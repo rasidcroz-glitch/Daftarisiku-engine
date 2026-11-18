@@ -1,0 +1,22 @@
+# Render Blueprint — DaftarIsiKu engine.
+# Cara pakai: push folder toc-app/ ke repo GitHub, lalu di dashboard
+# Render pilih "New +" -> "Blueprint" -> hubungkan repo ini.
+# Render membaca file ini dan membuat web service Docker (plan free).
+services:
+  - type: web
+    name: daftarisiku-engine
+    runtime: docker
+    dockerfilePath: ./engine/Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        # Domain website Vercel (tanpa slash akhir).
+        # Sampai diganti, browser tidak bisa memanggil API lintas origin.
+        value: https://daftarisiku-web.vercel.app
+      - key: JOB_TTL_SECONDS
+        value: "86400"
+      - key: GUNICORN_WORKERS
+        value: "1"
+      - key: MAX_UPLOAD_BYTES
+        value: "10485760"
