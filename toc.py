@@ -58,6 +58,12 @@ Alur:
       daftar isi/gambar/tabel yang baru. Bila dokumen tidak punya
       daftar lama, dipakai nilai default (indent 0,6 cm/level, tab di
       ujung lebar teks, Times New Roman 12).
+  12. Spasi antar-entri dilegakan (v0.6.4): daftar isi asli dokumen
+      umumnya 1 spasi (space_after 2 pt) sehingga baris-barisnya
+      terlihat dempet; entri baru memakai space_after minimal 6 pt
+      supaya ada napas antar-baris (bila format asli sudah lebih lega,
+      dipakai nilai aslinya). Baris lanjutan judul yang sama tetap
+      rapat (1 spasi) supaya judul tidak terpecah.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -859,9 +865,13 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
     def add_entry(text, page, level, bold):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_after = Pt(
-            old_fmt["space_after_pt"]
-            if old_fmt and old_fmt["space_after_pt"] is not None else 2)
+        # v0.6.4: spasi antar-entri minimal 6 pt supaya daftar isi
+        # tidak dempet — aslinya 2 pt (1 spasi) terlalu rapat di mata.
+        # Bila format asli sudah lebih lega, pakai nilai aslinya.
+        _after = (old_fmt["space_after_pt"]
+                  if old_fmt and old_fmt["space_after_pt"] is not None
+                  else 2)
+        p.paragraph_format.space_after = Pt(max(_after, 6))
         p.paragraph_format.space_before = Pt(
             old_fmt["space_before_pt"]
             if old_fmt and old_fmt["space_before_pt"] is not None else 0)
