@@ -62,7 +62,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.6"
+VERSION = "0.6.7"  # v0.6.7: nama download mengikuti file yang di-upload
 
 
 # --- CORS manual (tanpa dependensi tambahan) ------------------------
@@ -192,6 +192,14 @@ def make_toc():
 
     out_path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
     shutil.move(rep["output_docx"], out_path)
+    # v0.6.7: simpan nama file asli supaya nama download mengikuti
+    # file yang di-upload (bukan "skripsi-daftar-isi.docx" terus).
+    try:
+        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json"),
+                  "w") as mf:
+            json.dump({"filename": filename}, mf)
+    except OSError:
+        pass
     shutil.rmtree(work, ignore_errors=True)
     return jsonify({
         "job": job,
@@ -236,8 +244,21 @@ def download(job):
                         "amount": 15000,
                         "hint": "bayar Rp15.000 via QRIS dulu, "
                                 "lalu download lagi"}), 402
+    # v0.6.7: nama download mengikuti file yang di-upload
+    # ("Laporan.docx" -> "Laporan-daftar-isi.docx"); job lama tanpa
+    # meta tetap memakai nama lama.
+    dl_name = "skripsi-daftar-isi.docx"
+    try:
+        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json")) as mf:
+            orig = (json.load(mf) or {}).get("filename") or ""
+        stem = orig[:-5] if orig.lower().endswith(".docx") \
+            else os.path.splitext(orig)[0]
+        stem = secure_filename(stem) or "skripsi"
+        dl_name = f"{stem}-daftar-isi.docx"
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
     return send_file(path, as_attachment=True,
-                     download_name="skripsi-daftar-isi.docx")
+                     download_name=dl_name)
 
 
 if __name__ == "__main__":
