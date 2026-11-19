@@ -33,6 +33,19 @@ Alur:
   8. Nomor halaman footer (v0.6.0): field PAGE di footer — halaman
      depan Romawi kecil tengah bawah (cover tidak menampilkan nomor),
      mulai BAB I angka Arab kanan bawah dari 1.
+  9. Daftar isi lama diabaikan (v0.6.1): dokumen yang sudah berisi
+     daftar isi lama ("BAB I\t1", "1. Rumusan Masalah\t7" — baris
+     Normal ber-akhir tab/titik + nomor halaman, atau tab saja)
+     tidak lagi dibaca sebagai heading (tidak jadi entri duplikat),
+     baris-baris lama itu dihapus dari dokumen hasil supaya hanya ada
+     satu daftar isi yang baru, dan PDF input di-render dari salinan
+     yang daftar lamanya sudah dibuang supaya pencarian halaman tidak
+     ketemu teks daftar lama. Karena penyisipan daftar isi bisa
+     menggeser alur halaman depan (BAB I tidak selalu mulai di
+     halaman baru), SEMUA label dikoreksi ulang dari PDF hasil
+     sebelum dokumen final disimpan. Judul yang sangat panjang
+     dicari dengan 60 karakter pertamanya bila terbelah halaman.
+     Berlaku juga untuk baris daftar gambar/tabel lama.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -64,6 +77,64 @@ RE_LOWER = re.compile(r"^([a-z])\.\s+\S")
 RE_CAPTION = re.compile(r"^(Gambar|Tabel)\s+(\d+(?:[.\s]\d+)*)\s+\S",
                          re.IGNORECASE)
 RE_LAMPIRAN = re.compile(r"^LAMPIRAN\s+\d+\b", re.IGNORECASE)
+# Baris daftar isi LAMA (v0.6.1): "BAB I\t1", "1. Rumusan Masalah\t7",
+# "HALAMAN PERSETUJUAN PEMBIMBING\tii" — teks diakhiri tab / titik-titik /
+# spasi ganda + nomor halaman (Arab atau Romawi), atau tab saja di akhir
+# (nomornya terhapus). Judul asli tidak pernah diakhiri pola itu, jadi
+# pola ini aman dipakai sebagai penanda baris daftar isi lama yang
+# harus diabaikan (dan dihapus dari hasil).
+RE_OLD_TOC_LINE = re.compile(
+    r"(?:\t\s*([0-9]+|[ivxlcdm]+)?\s*$"
+    r"|\.{2,}\s*([0-9]+|[ivxlcdm]+)\s*$"
+    r"|…+\s*([0-9]+|[ivxlcdm]+)\s*$"
+    r"| {2,}\s*([0-9]+|[ivxlcdm]+)\s*$)",
+    re.IGNORECASE)
+
+
+def _is_old_toc_line(p):
+    """True bila paragraf ini baris daftar isi lama: gaya Normal (atau
+    gaya TOC Word) dan teksnya diakhiri tab/titik-titik + nomor halaman.
+    Dipakai raw text (bukan norm) karena norm() menghapus tab."""
+    style = p.style.name
+    if style != "Normal" and not style.startswith("TOC"):
+        return False
+    return bool(RE_OLD_TOC_LINE.search(p.text or ""))
+
+
+def _para_has_page_break(p):
+    """Paragraf mengandung page break eksplisit (w:br type=page)."""
+    return 'w:type="page"' in p._p.xml
+
+
+def _remove_old_toc_runs(doc):
+    """Hapus baris-baris daftar lama dari dokumen (v0.6.1).
+
+    Setelah heading 'DAFTAR ISI' / 'DAFTAR GAMBAR' / 'DAFTAR TABEL',
+    hapus run paragraf kosong + baris daftar lama, sampai paragraf
+    pertama yang bukan keduanya (atau paragraf berisi page break —
+    itu pemisah bagian, jangan dihapus). Dipakai sebelum render PDF
+    input (supaya pencarian halaman tidak ketemu teks daftar lama)
+    dan saat membangun dokumen hasil (supaya hanya ada satu daftar
+    yang baru). Kembalikan jumlah paragraf yang dihapus."""
+    paras = doc.paragraphs
+    doomed = []
+    seen = set()
+    for idx, p in enumerate(paras):
+        if norm(p.text).upper() not in ("DAFTAR ISI", "DAFTAR GAMBAR",
+                                        "DAFTAR TABEL"):
+            continue
+        for q in paras[idx + 1:]:
+            if _para_has_page_break(q):
+                break
+            if not norm(q.text) or _is_old_toc_line(q):
+                if id(q) not in seen:
+                    seen.add(id(q))
+                    doomed.append(q)
+                continue
+            break
+    for p in doomed:
+        p._element.getparent().remove(p._element)
+    return len(doomed)
 FRONT_TITLES = [
     "PERNYATAAN ORIGINALITAS",
     "HALAMAN PERSETUJUAN PEMBIMBING",
@@ -300,6 +371,11 @@ def extract_structure(docx_path):
         text = texts[i]
         if not text:
             continue
+        if _is_old_toc_line(p):
+            # v0.6.1: baris daftar isi LAMA ("BAB I\t1",
+            # "1. Rumusan Masalah\t7") bukan heading asli — abaikan
+            # supaya tidak jadi entri duplikat dengan nomor salah.
+            continue
         upper = text.upper()
         style = p.style.name
         # --- halaman depan (sebelum BAB I) ---
@@ -504,6 +580,10 @@ def extract_captions(docx_path):
     gambar, tabel = [], []
     for i, p in enumerate(doc.paragraphs):
         text = norm(p.text)
+        if _is_old_toc_line(p):
+            # v0.6.1: baris daftar gambar/tabel LAMA ("Gambar 1.1 ...\t5")
+            # bukan caption asli — abaikan supaya tidak jadi entri duplikat.
+            continue
         m = RE_CAPTION.match(text)
         if not m:
             continue
@@ -562,12 +642,19 @@ def _page_contains(page_text, key):
 
 def _key_in_page(page_text, key):
     """Cek satu kunci ('text' = substring, 'bab' = regex BAB dengan
-    batas kata agar 'BAB II' tidak cocok dengan 'BAB III')."""
+    batas kata agar 'BAB II' tidak cocok dengan 'BAB III').
+    Judul yang sangat panjang (kalimat definisi) bisa terbelah
+    halaman di PDF — bila teks penuh tidak ketemu, 60 karakter
+    pertamanya cukup sebagai kunci (v0.6.1)."""
     kind, pat = key
     if kind == "bab":
         rx = re.compile(rf"BAB\s+{pat}\b(?![IVXLC])", re.IGNORECASE)
         return rx.search(page_text) is not None
-    return _page_contains(page_text, pat)
+    if _page_contains(page_text, pat):
+        return True
+    if len(pat) > 60:
+        return _page_contains(page_text, pat[:60])
+    return False
 
 
 def _find_key(pages_text, keys, start=0):
@@ -653,6 +740,9 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
         (sec.page_width - sec.left_margin - sec.right_margin) / 635
     )  # 1 twip = 635 EMU
 
+    # v0.6.1: buang dulu baris-baris daftar lama, baru cari anchor —
+    # supaya paras tidak memuat paragraf yang sudah dilepas.
+    _remove_old_toc_runs(doc)
     paras = doc.paragraphs
 
     def find_heading(title):
@@ -1118,13 +1208,7 @@ def _heading_page_out(pages_lines, entry):
 
 def verify_output(pdf_path, entries):
     """Verifikasi: hitung ulang label dari PDF HASIL dan bandingkan
-    dengan label di daftar isi. Entri halaman depan dicari dari
-    kemunculan PERTAMA (judulnya ada sebelum daftar isi; yang
-    post_anchor memakai kemunculan terakhir baris judulnya).
-    Entri isi dicari berurutan MULAI DARI HALAMAN BAB I — baris
-    daftar isi/gambar/tabel (yang memuat teks heading juga) ada
-    sebelum BAB I, jadi pointer harus mulai di sana agar tidak
-    ketemu baris daftar duluan."""
+    dengan label di daftar isi."""
     pages = pdf_pages_text(pdf_path)
     lines = pdf_pages_lines(pdf_path)
     # BAB I = halaman kemunculan terakhir "BAB I PENDAHULUAN" di PDF hasil.
@@ -1132,7 +1216,24 @@ def verify_output(pdf_path, entries):
                  if _page_contains(t, "BAB I PENDAHULUAN")]
     bab1 = bab1_hits[-1] if bab1_hits else None
     mismatches = []
+    for e, (pdf_page, expect) in zip(
+            entries, _expected_labels(pages, lines, entries, bab1)):
+        if pdf_page is None:
+            mismatches.append((e["text"], e["page"], "tidak ketemu"))
+        elif expect != e["page"]:
+            mismatches.append((e["text"], e["page"], expect))
+    return mismatches
+
+
+
+def _expected_labels(pages, lines, entries, bab1):
+    """Untuk tiap entri, hitung (pdf_page, label) dari PDF — dipakai
+    verifikasi dan koreksi label. Logika sama seperti verify_output:
+    entri halaman depan dicari dari kemunculan pertama (post_anchor:
+    terakhir), entri isi dicari berurutan mulai dari halaman BAB I
+    agar tidak ketemu baris daftar isi duluan."""
     pointer = (bab1 - 1) if bab1 is not None else 0
+    out = []
     for e in entries:
         keys = e.get("search") or [("text", e["text"])]
         if e["kind"] == "front":
@@ -1145,7 +1246,7 @@ def verify_output(pdf_path, entries):
             if pdf_page is not None:
                 pointer = pdf_page - 1
         if pdf_page is None:
-            mismatches.append((e["text"], e["page"], "tidak ketemu"))
+            out.append((None, None))
             continue
         if e["kind"] == "front":
             expect = to_roman(pdf_page)
@@ -1153,30 +1254,31 @@ def verify_output(pdf_path, entries):
             expect = str(pdf_page - bab1 + 1)
         else:
             expect = str(pdf_page)
-        if expect != e["page"]:
-            mismatches.append((e["text"], e["page"], expect))
-    return mismatches
+        out.append((pdf_page, expect))
+    return out
 
 
-
-def _fix_post_anchor_labels(pdf_path, entries):
-    """Koreksi label Romawi entri halaman depan yang judulnya ada
-    SETELAH daftar isi (mis. DAFTAR TABEL/GAMBAR): halaman judul itu
-    bergeser karena daftar isi yang disisipkan, jadi label dari PDF
-    masuk sudah tidak berlaku. Hitung ulang dari PDF hasil.
-    Kembalikan True bila ada label yang berubah."""
+def _fix_labels_from_output(pdf_path, entries, gambar, tabel):
+    """Koreksi SEMUA label (isi + depan + gambar/tabel) dari PDF hasil
+    (v0.6.1): penyisipan daftar isi mengubah alur halaman depan
+    (BAB I tidak selalu mulai di halaman baru), jadi label dari PDF
+    masuk bisa bergeser 1 halaman. Hitung ulang dari PDF hasil;
+    kembalikan True bila ada yang berubah. Mengubah angka di baris
+    daftar isi tidak mengubah pagination, jadi satu rebuild cukup."""
+    pages = pdf_pages_text(pdf_path)
     lines = pdf_pages_lines(pdf_path)
+    bab1_hits = [i + 1 for i, t in enumerate(pages)
+                 if _page_contains(t, "BAB I PENDAHULUAN")]
+    bab1 = bab1_hits[-1] if bab1_hits else None
     changed = False
-    for e in entries:
-        if e["kind"] != "front" or not e.get("post_anchor"):
-            continue
-        pdf_page = _heading_page_out(lines, e)
-        if pdf_page is None:
-            continue
-        label = to_roman(pdf_page)
-        if label != e["page"]:
-            e["page"] = label
-            changed = True
+    for lst in (entries, gambar, tabel):
+        for e, (_pg, expect) in zip(
+                lst, _expected_labels(pages, lines, lst, bab1)):
+            if expect is None:
+                continue
+            if expect != e["page"]:
+                e["page"] = expect
+                changed = True
     return changed
 
 
@@ -1192,7 +1294,16 @@ def process(docx_path, work_dir, include_lists=True):
         raise ValueError("Tidak ada heading yang terdeteksi di dokumen.")
     gambar, tabel = extract_captions(docx_path) if include_lists else ([], [])
 
-    pdf_in = render_pdf(docx_path, work_dir)
+    # v0.6.1: render PDF input dari salinan yang baris daftar lamanya
+    # sudah dibuang — kalau tidak, pencarian halaman (substring)
+    # ketemu teks daftar lama di halaman depan dan semua label isi
+    # jadi salah (mis. 'Rumusan Masalah' ketemu di halaman daftar
+    # isi, bukan di BAB I).
+    clean_path = os.path.join(work_dir, "_bersih.docx")
+    _clean = Document(docx_path)
+    _remove_old_toc_runs(_clean)
+    _clean.save(clean_path)
+    pdf_in = render_pdf(clean_path, work_dir)
     pages_in = pdf_pages_text(pdf_in)
     total_in = len(pages_in)
     find_pages(pages_in, entries)
@@ -1213,14 +1324,14 @@ def process(docx_path, work_dir, include_lists=True):
 
     # --- verifikasi: nomor Arab relatif terhadap BAB I, jadi penyisipan
     # TOC sebelum BAB I TIDAK mengubah nomor (BAB I dan semua heading
-    # bergeser sama besar). Render ulang dan hitung ulang labelnya.
-    # Label Romawi entri halaman depan yang judulnya ada setelah
-    # daftar isi dikoreksi dari PDF hasil (satu pass rebuild bila
-    # berubah — mengubah angka di baris daftar isi tidak mengubah
-    # pagination, jadi satu pass cukup).
+    # bergeser sama besar) — kecuali bila BAB I tidak mulai di halaman
+    # baru: alur halaman depannya berubah dan label isi bisa bergeser
+    # 1 halaman (v0.6.1). Karena itu SEMUA label dikoreksi ulang dari
+    # PDF hasil; mengubah angka di baris daftar isi tidak mengubah
+    # pagination, jadi satu pass rebuild cukup.
     pdf_out = render_pdf(out_docx, work_dir)
     total_out = len(pdf_pages_text(pdf_out))
-    if _fix_post_anchor_labels(pdf_out, entries):
+    if _fix_labels_from_output(pdf_out, entries, gambar, tabel):
         build_output_docx(docx_path, entries, out_docx,
                           gambar=gambar, tabel=tabel)
         pdf_out = render_pdf(out_docx, work_dir)

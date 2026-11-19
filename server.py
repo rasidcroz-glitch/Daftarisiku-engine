@@ -62,7 +62,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 # --- CORS manual (tanpa dependensi tambahan) ------------------------
