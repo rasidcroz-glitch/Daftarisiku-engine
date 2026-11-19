@@ -7,7 +7,10 @@ import os
 
 bind = "0.0.0.0:" + os.environ.get("PORT", "5000")
 workers = int(os.environ.get("GUNICORN_WORKERS", "1"))
-threads = int(os.environ.get("GUNICORN_THREADS", "2"))
+# v0.6.2: 1 thread saja — dua request /api/toc bersamaan berarti dua
+# LibreOffice (~325 MB tiap proses) + Python, langsung melewati
+# 512 MB. Satu request jalan, yang lain antre.
+threads = int(os.environ.get("GUNICORN_THREADS", "1"))
 timeout = int(os.environ.get("GUNICORN_TIMEOUT", "300"))
 graceful_timeout = 30
 keepalive = 5

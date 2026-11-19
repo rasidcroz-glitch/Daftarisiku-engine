@@ -46,12 +46,20 @@ Alur:
      sebelum dokumen final disimpan. Judul yang sangat panjang
      dicari dengan 60 karakter pertamanya bila terbelah halaman.
      Berlaku juga untuk baris daftar gambar/tabel lama.
+  10. Hemat memori (v0.6.2): sebelum tiap render LibreOffice, arena
+      Python dikembalikan ke OS (malloc_trim) supaya RSS Python turun
+      dari ~160 MB ke ~60 MB — LibreOffice sendiri ~325 MB, jadi total
+      puncak ~390 MB dan muat di container 512 MB untuk dokumen besar
+      (144 halaman). Gunicorn 1 thread supaya dua request tidak
+      me-render bersamaan.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
 """
 
 import copy
+import ctypes
+import gc
 import os
 import re
 import shutil
@@ -64,6 +72,21 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT, WD_TA
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, Twips
+
+def _trim_memory():
+    """Kembalikan memori arena Python ke OS (v0.6.2): objek Document
+    besar sudah dibebaskan (refcount) tapi arena-nya dipertahankan
+    Python — tanpa trim, RSS Python bisa 150 MB+ saat LibreOffice
+    (325 MB) jalan bersamaan dan total melewati 512 MB. Dipanggil
+    tepat sebelum tiap render LibreOffice. Aman bila gagal (glibc
+    tidak ada / bukan Linux): lanjut tanpa trim."""
+    try:
+        gc.collect()
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------- pola
 RE_BAB = re.compile(r"^BAB\s+([IVXLC]+)\b", re.IGNORECASE)
@@ -603,6 +626,7 @@ def extract_captions(docx_path):
 def render_pdf(docx_path, out_dir):
     """Render .docx ke PDF via LibreOffice headless. Kembalikan path PDF."""
     os.makedirs(out_dir, exist_ok=True)
+    _trim_memory()  # v0.6.2: kecilkan RSS Python sebelum soffice jalan
     subprocess.run(
         ["soffice", "--headless", "--convert-to", "pdf",
          "--outdir", out_dir, docx_path],
