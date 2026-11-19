@@ -64,6 +64,10 @@ Alur:
       supaya ada napas antar-baris (bila format asli sudah lebih lega,
       dipakai nilai aslinya). Baris lanjutan judul yang sama tetap
       rapat (1 spasi) supaya judul tidak terpecah.
+  13. Lembar terpisah (v0.6.5): DAFTAR GAMBAR dan DAFTAR TABEL
+      masing-masing mulai di halaman baru (pageBreakBefore pada
+      judulnya, baik judul asli dokumen maupun judul yang dibuat
+      mesin) — tidak digabung dengan daftar isi atau satu sama lain.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -813,6 +817,13 @@ def _insert_after(ref_para, new_para):
     ref_para._p.addnext(new_para._p)
 
 
+def _page_break_before(p):
+    """Pastikan paragraf mulai di halaman baru (v0.6.5): daftar
+    gambar dan daftar tabel masing-masing di lembar sendiri, tidak
+    digabung dengan daftar isi atau satu sama lain."""
+    p.paragraph_format.page_break_before = True
+
+
 def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
     """Sisipkan daftar isi setelah heading 'DAFTAR ISI' (atau sebelum
     BAB I bila heading itu tidak ada), lalu DAFTAR GAMBAR dan
@@ -939,6 +950,8 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
             g_anchor = last_anchor
         else:
             g_anchor = g_head
+        # v0.6.5: daftar gambar mulai di lembar baru.
+        _page_break_before(g_made[0] if g_head is None else g_head)
         for e in gambar:
             g_made.append(add_entry(disp(e), e["page"], 0, False))
         last_anchor = insert_after_seq(g_anchor, g_made)
@@ -953,6 +966,8 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
             t_anchor = last_anchor
         else:
             t_anchor = t_head
+        # v0.6.5: daftar tabel mulai di lembar baru.
+        _page_break_before(t_made[0] if t_head is None else t_head)
         for e in tabel:
             t_made.append(add_entry(disp(e), e["page"], 0, False))
         insert_after_seq(t_anchor, t_made)
