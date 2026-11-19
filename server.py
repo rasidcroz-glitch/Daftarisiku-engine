@@ -18,6 +18,10 @@ Endpoint:
                                download_url}. Pratinjau gratis.
   POST /api/pay/mock/<job>  -> PROTOTIPE SAJA: menandai job sudah dibayar.
                                Diganti webhook Midtrans saat rilis.
+  GET  /api/status/<job>     -> {job, paid, amount, filename}; 404 bila
+                               job tidak ada/kedaluwarsa. Dipakai website
+                               untuk mengecek status bayar (mis. setelah
+                               refresh) sebelum membuka tombol download.
   GET  /api/download/<job>  -> file .docx hasil; 402 bila belum dibayar.
 
 Keamanan/batas:
@@ -62,7 +66,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.7"  # v0.6.7: nama download mengikuti file yang di-upload
+VERSION = "0.6.8"  # v0.6.8: endpoint /api/status buat cek status bayar + display (nomor) di /api/toc
 
 
 # --- CORS manual (tanpa dependensi tambahan) ------------------------
@@ -78,6 +82,7 @@ def apply_cors(resp):
 
 
 @app.route("/api/toc", methods=["OPTIONS"])
+@app.route("/api/status/<job>", methods=["OPTIONS"])
 @app.route("/api/download/<job>", methods=["OPTIONS"])
 @app.route("/api/pay/mock/<job>", methods=["OPTIONS"])
 def _preflight(job=None):
@@ -204,12 +209,12 @@ def make_toc():
     return jsonify({
         "job": job,
         "toc_text": rep["toc_text"],
-        "entries": [{"text": e["text"], "level": e["level"],
-                     "page": e["page"]} for e in rep["entries"]],
-        "daftar_gambar": [{"text": e["text"], "page": e["page"]}
-                          for e in rep["daftar_gambar"]],
-        "daftar_tabel": [{"text": e["text"], "page": e["page"]}
-                         for e in rep["daftar_tabel"]],
+        "entries": [{"text": e["text"], "display": e.get("display") or e["text"],
+                     "level": e["level"], "page": e["page"]} for e in rep["entries"]],
+        "daftar_gambar": [{"text": e["text"], "display": e.get("display") or e["text"],
+                           "page": e["page"]} for e in rep["daftar_gambar"]],
+        "daftar_tabel": [{"text": e["text"], "display": e.get("display") or e["text"],
+                          "page": e["page"]} for e in rep["daftar_tabel"]],
         "pages_in": rep["pages_in"],
         "pages_out": rep["pages_out"],
         "verification": "lolos" if not rep["mismatches"] else rep["mismatches"],
@@ -230,6 +235,27 @@ def mock_pay(job):
     save_paid(paid)
     return jsonify({"job": job, "paid": True, "amount": 15000,
                     "mock": True})
+
+
+@app.get("/api/status/<job>")
+def status(job):
+    """v0.6.8: cek status bayar sebuah job tanpa men-download.
+    Dipakai website setelah refresh halaman (job tersimpan di
+    localStorage) dan sebelum tombol download dibuka — supaya
+    tombol tidak terkunci padahal sudah bayar."""
+    if not job.isalnum() or len(job) > 32:
+        return jsonify({"error": "job tidak valid"}), 400
+    path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
+    if not os.path.exists(path):
+        return jsonify({"error": "hasil tidak ditemukan atau sudah kedaluwarsa (24 jam)"}), 404
+    filename = None
+    try:
+        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json")) as mf:
+            filename = (json.load(mf) or {}).get("filename")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return jsonify({"job": job, "paid": job in load_paid(),
+                    "amount": 15000, "filename": filename})
 
 
 @app.get("/api/download/<job>")
