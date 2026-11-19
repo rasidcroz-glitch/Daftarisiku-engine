@@ -52,6 +52,12 @@ Alur:
       puncak ~390 MB dan muat di container 512 MB untuk dokumen besar
       (144 halaman). Gunicorn 1 thread supaya dua request tidak
       me-render bersamaan.
+  11. Samakan format dengan file asli (v0.6.3): sebelum baris daftar
+      lama dihapus, formatnya dibaca dulu — indent tiap level, posisi
+      tab stop kanan, spasi antar-baris, dan font — lalu dipakai untuk
+      daftar isi/gambar/tabel yang baru. Bila dokumen tidak punya
+      daftar lama, dipakai nilai default (indent 0,6 cm/level, tab di
+      ujung lebar teks, Times New Roman 12).
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -127,6 +133,59 @@ def _is_old_toc_line(p):
 def _para_has_page_break(p):
     """Paragraf mengandung page break eksplisit (w:br type=page)."""
     return 'w:type="page"' in p._p.xml
+
+
+def _capture_old_toc_format(doc):
+    """Baca format baris daftar isi LAMA sebelum dihapus (v0.6.3):
+    indent tiap level, tab stop kanan, spasi, dan font — supaya daftar
+    isi baru memakai format yang SAMA PERSIS dengan file aslinya,
+    bukan nilai hardcode. Kembalikan dict, atau None bila dokumen
+    tidak punya baris daftar lama."""
+    from collections import Counter
+    paras = doc.paragraphs
+    indents, tabs, afters, befores, firsts, fonts = [], [], [], [], [], []
+    for idx, p in enumerate(paras):
+        if norm(p.text).upper() not in ("DAFTAR ISI", "DAFTAR GAMBAR",
+                                        "DAFTAR TABEL"):
+            continue
+        for q in paras[idx + 1:]:
+            if _para_has_page_break(q):
+                break
+            if not norm(q.text):
+                continue
+            if not _is_old_toc_line(q):
+                break
+            pf = q.paragraph_format
+            indents.append(pf.left_indent.cm
+                           if pf.left_indent is not None else 0.0)
+            for t in pf.tab_stops:
+                if str(t.alignment).startswith("RIGHT"):
+                    tabs.append(round(t.position.cm, 2))
+            if pf.space_after is not None:
+                afters.append(round(pf.space_after.pt, 1))
+            if pf.space_before is not None:
+                befores.append(round(pf.space_before.pt, 1))
+            firsts.append(pf.first_line_indent.cm
+                          if pf.first_line_indent is not None else 0.0)
+            if q.runs:
+                r = q.runs[0]
+                fonts.append((r.font.name,
+                              r.font.size.pt if r.font.size else None))
+    if not indents:
+        return None
+    uniq = sorted(set(round(v, 2) for v in indents))
+    def _common(vals, default=None):
+        vals = [v for v in vals if v is not None]
+        return Counter(vals).most_common(1)[0][0] if vals else default
+    return {
+        "indents": uniq,
+        "tab_cm": _common(tabs),
+        "space_after_pt": _common(afters),
+        "space_before_pt": _common(befores),
+        "first_cm": _common(firsts, 0.0),
+        "font_name": _common([f[0] for f in fonts]),
+        "font_size_pt": _common([f[1] for f in fonts]),
+    }
 
 
 def _remove_old_toc_runs(doc):
@@ -764,6 +823,11 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
         (sec.page_width - sec.left_margin - sec.right_margin) / 635
     )  # 1 twip = 635 EMU
 
+    # v0.6.3: baca dulu format daftar isi lama (indent per level,
+    # tab stop, spasi, font) supaya daftar baru sama persis dengan
+    # file aslinya; bila tidak ada daftar lama, pakai nilai default.
+    old_fmt = _capture_old_toc_format(doc)
+
     # v0.6.1: buang dulu baris-baris daftar lama, baru cari anchor —
     # supaya paras tidak memuat paragraf yang sudah dilepas.
     _remove_old_toc_runs(doc)
@@ -783,18 +847,37 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
         anchor = paras[bab_idx] if bab_idx is not None else paras[-1]
         insert_before_bab = True
 
+    def _indent_for_level(level):
+        if old_fmt is None:
+            return Cm(0.6 * level)
+        inds = old_fmt["indents"]
+        if level < len(inds):
+            return Cm(inds[level])
+        step = (inds[-1] - inds[-2]) if len(inds) >= 2 else 0.6
+        return Cm(inds[-1] + step * (level - len(inds) + 1))
+
     def add_entry(text, page, level, bold):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        p.paragraph_format.space_after = Pt(2)
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.left_indent = Cm(0.6 * level)
+        p.paragraph_format.space_after = Pt(
+            old_fmt["space_after_pt"]
+            if old_fmt and old_fmt["space_after_pt"] is not None else 2)
+        p.paragraph_format.space_before = Pt(
+            old_fmt["space_before_pt"]
+            if old_fmt and old_fmt["space_before_pt"] is not None else 0)
+        p.paragraph_format.left_indent = _indent_for_level(level)
+        p.paragraph_format.first_line_indent = Cm(
+            old_fmt["first_cm"] if old_fmt else 0)
+        tab_cm = old_fmt["tab_cm"] if old_fmt and old_fmt["tab_cm"] else None
         p.paragraph_format.tab_stops.add_tab_stop(
-            Twips(usable_twips), WD_TAB_ALIGNMENT.RIGHT,
-            WD_TAB_LEADER.DOTS)
+            Cm(tab_cm) if tab_cm else Twips(usable_twips),
+            WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
         r = p.add_run(f"{text}\t{page}")
-        r.font.name = "Times New Roman"
-        r.font.size = Pt(12)
+        r.font.name = (old_fmt["font_name"]
+                       if old_fmt and old_fmt["font_name"]
+                       else "Times New Roman")
+        r.font.size = Pt(old_fmt["font_size_pt"]
+                         if old_fmt and old_fmt["font_size_pt"] else 12)
         r.bold = bold
         return p
 
