@@ -68,6 +68,21 @@ Alur:
       masing-masing mulai di halaman baru (pageBreakBefore pada
       judulnya, baik judul asli dokumen maupun judul yang dibuat
       mesin) — tidak digabung dengan daftar isi atau satu sama lain.
+  14. Dokumen ber-Heading (v0.6.6): dokumen yang memakai Heading 1/2
+      asli Word (bukan List Paragraph) kini dibaca dari stylenya —
+      Heading 1 jadi sub-bab, Heading 2 jadi sub-sub — dan butir
+      List Paragraph di dokumen seperti itu kena gerbang ketat: di
+      bawah BAB hanya butir tebal yang diterima, di bawah sub-bab
+      hanya butir level 2 yang induknya heading asli dan nomor
+      listnya sama dengan induk. Dokumen skripsi biasa (tanpa
+      Heading 1/2 isi) tidak berubah. "LEMBAR PERSETUJUAN" dikenal
+      sebagai halaman depan. _strip_prefix kini membuang nomor
+      bertitik penuh ("4.1 ..." -> "", bukan "1 ..."). Judul bagian
+      yang tertulis sebelum judul BAB-nya ditampung lalu ditempel di
+      bawah BAB itu, dan diberi page_break_before supaya tidak
+      tertinggal di akhir halaman daftar isi (keepNext tidak mempan
+      karena ada section break di judul BAB). Baris judul BAB boleh
+      bergaya Heading 1/2, bukan hanya Normal.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -234,6 +249,7 @@ FRONT_TITLES = [
     "KATA PENGANTAR",
     "DAFTAR ISI",
     "HALAMAN PERSETUJUAN",
+    "LEMBAR PERSETUJUAN",
     "LEMBAR PENGESAHAN",
     "ABSTRAK",
     "DAFTAR TABEL",
@@ -265,8 +281,11 @@ def _nospace(text):
 
 
 def _strip_prefix(text, lvl=None):
-    """Buang awalan penomoran ('A. ', '1. ', 'a. ') dari judul."""
-    return re.sub(r"^([A-Za-z]\.|\d+\.)\s*", "", text or "")
+    """Buang awalan penomoran ('A. ', '1. ', 'a. ', '4.1 ') dari judul.
+    Nomor bertitik dibuang penuh ('4.1 Asuhan...' -> 'Asuhan...'),
+    bukan hanya kelompok pertamanya."""
+    return re.sub(r"^(?:[A-Za-z]\.|\d+(?:\.\d+)+\.?|\d+\.)\s*", "",
+                  text or "")
 
 
 # ---------------------------------------------------------------- info paragraf
@@ -379,6 +398,33 @@ def extract_structure(docx_path):
     # Tumpukan heading terakhir (untuk menentukan level butir List
     # Paragraph): tiap item {"level", "ilvl", "indent"}.
     stack = []
+    # v0.6.6: dokumen "ber-Heading" — penulis memakai Heading 1/2
+    # asli Word untuk judul bagian (bukan List Paragraph). Dihitung
+    # dari H1/H2 isi (bukan judul BAB, pustaka/lampiran, atau halaman
+    # depan); >= 3 berarti dokumen ber-Heading (laporan nifas = 14;
+    # skripsi Gunak = 1, Gusti Ayu = 0 -> bukan).
+    n_head = 0
+    for _p in paras:
+        if _p.style.name in ("Heading 1", "Heading 2"):
+            _t = norm(_p.text)
+            if not _t:
+                continue
+            _u = _t.upper()
+            if RE_BAB.match(_t):
+                continue
+            if _u in ("DAFTAR PUSTAKA", "DAFTAR LAMPIRAN"):
+                continue
+            if _u.replace(" ", "") in FRONT_BY_NOSPACE:
+                continue
+            n_head += 1
+    heading_styled = n_head >= 3
+    # v0.6.6: judul bagian yang penulis letakkan SEBELUM judul BAB-nya
+    # (mis. "Latar Belakang" tebal tepat sebelum "BAB I PENDAHULUAN"
+    # pada laporan nifas — satu list Word yang sama dengan isi BAB I).
+    # Ditampung dulu, lalu ditempel di bawah BAB pertama sebagai
+    # sub-sub. Hanya untuk dokumen ber-Heading dan hanya butir tebal
+    # pendek setelah jangkar DAFTAR ISI yang bukan baris daftar lama.
+    pending_pre_bab = []
 
     def push(e):
         while stack and stack[-1]["level"] >= e["level"]:
@@ -386,11 +432,12 @@ def extract_structure(docx_path):
         stack.append({"level": e["level"],
                       "ilvl": e.get("ilvl"), "indent": e.get("indent"),
                       "numId": e.get("numId"),
-                      "lp_bold": e.get("lp_bold", False)})
+                      "lp_bold": e.get("lp_bold", False),
+                      "is_heading": e.get("is_heading", True)})
 
     def add(text, level, kind, idx, bold=False, display=None, search=None,
             post_anchor=False, term=None, ilvl=None, indent=None,
-            numId=None, lp_bold=False):
+            numId=None, lp_bold=False, is_heading=True):
         nonlocal n_l2, n_l3
         if kind == "bab":
             n_l2 = 0
@@ -409,7 +456,7 @@ def extract_structure(docx_path):
              "search": search if search is not None else [("text", text)],
              "post_anchor": post_anchor, "term": term,
              "ilvl": ilvl, "indent": indent, "numId": numId,
-             "lp_bold": lp_bold}
+             "lp_bold": lp_bold, "is_heading": is_heading}
         entries.append(e)
         push(e)
         return e
@@ -494,7 +541,11 @@ def extract_structure(docx_path):
                     j += 1
                 if j < len(paras):
                     t2 = texts[j]
-                    if (paras[j].style.name == "Normal"
+                    # v0.6.6: baris judul BAB boleh bergaya Normal ATAU
+                    # Heading 1/2 ("BAB I" + "PENDAHULUAN" yang keduanya
+                    # Heading 1 pada proposal Gunak).
+                    if (paras[j].style.name in ("Normal", "Heading 1",
+                                                "Heading 2")
                             and len(t2) <= 120
                             and not t2.endswith(".")
                             and not RE_CAPTION.match(t2)
@@ -508,7 +559,23 @@ def extract_structure(docx_path):
                         consumed.add(j)
             add(disp, 0, "bab", i, bold=True, display=disp.upper(),
                 search=search)
+            for (t, idx, il, ind, nid) in pending_pre_bab:
+                pe = add(t, 2, "sub", idx, bold=False,
+                         ilvl=il, indent=ind, numId=nid, is_heading=False)
+                # v0.6.6: mulai di halaman baru bersama BAB-nya
+                # (break_before, diterapkan di build_output_docx)
+                # supaya tidak tertinggal di akhir halaman daftar isi.
+                pe["break_before"] = True
+            pending_pre_bab.clear()
             continue
+        if not seen_bab and heading_styled and toc_anchor_idx is not None:
+            # v0.6.6: judul bagian sebelum BAB pertama (lihat di atas).
+            if (style == "List Paragraph" and _is_bold(p)
+                    and len(text) <= 70
+                    and not _is_old_toc_line(p)):
+                pending_pre_bab.append(
+                    (text, i, _ilvl(p), _indent_cm(p), _numId(p)))
+                continue
         if not seen_bab:
             continue  # abaikan isi halaman depan selain judul yang dikenal
         # --- penutup: pustaka & lampiran ---
@@ -528,6 +595,21 @@ def extract_structure(docx_path):
         # --- sub-bab: Heading 3 (tanpa huruf -> diberi A./B./C.) ---
         if style == "Heading 3":
             add(text, 1, "sub", i, bold=False,
+                ilvl=_ilvl(p), indent=_indent_cm(p), numId=_numId(p))
+            continue
+        # --- v0.6.6: Heading 1/2 asli (dokumen ber-Heading) ---
+        # Judul yang berupa kalimat utuh (diakhiri titik) atau sangat
+        # panjang bukan judul bagian — abaikan.
+        if style == "Heading 1":
+            if len(text) > 100 or text.endswith("."):
+                continue
+            add(text, 1, "sub", i, bold=False,
+                ilvl=_ilvl(p), indent=_indent_cm(p), numId=_numId(p))
+            continue
+        if style == "Heading 2":
+            if len(text) > 100 or text.endswith("."):
+                continue
+            add(text, 2, "sub", i, bold=False,
                 ilvl=_ilvl(p), indent=_indent_cm(p), numId=_numId(p))
             continue
         # --- awalan eksplisit (A. / 1. / a.) ---
@@ -557,6 +639,7 @@ def extract_structure(docx_path):
         if style == "List Paragraph":
             ilvl = _ilvl(p)
             ind = _indent_cm(p)
+            nid = _numId(p)
             bold = _is_bold(p)
             term = _extract_term(text, known_terms) if len(text) > 70 else None
             is_term = term is not None
@@ -577,12 +660,42 @@ def extract_structure(docx_path):
                                      and top.get("lp_bold"))))
             if not (short or is_term or bold_heading):
                 continue
-            lvl = level_for_list(ilvl, ind, is_term, top,
-                                 numId=_numId(p))
+            lvl = level_for_list(ilvl, ind, is_term, top, numId=nid)
             if lvl is None or lvl > 3:
                 continue
+            if heading_styled:
+                # v0.6.6 gerbang ketat: induk = entri tumpukan
+                # terdekat yang levelnya lebih dangkal dari kandidat.
+                parent = None
+                for s in reversed(stack):
+                    if s["level"] < lvl:
+                        parent = s
+                        break
+                if parent is None:
+                    continue
+                if parent["level"] == 0:
+                    # Langsung di bawah BAB: hanya butir tebal
+                    # (judul bagian) yang diterima — dinilai dari
+                    # butirnya sendiri, bukan dari tumpukan (tumpukan
+                    # bisa berisi sub-bab Heading 2 sehingga
+                    # bold_heading salah False).
+                    if not (bold and len(text) <= 120):
+                        continue
+                else:
+                    # Di bawah sub-bab: induk harus heading asli,
+                    # kandidat harus level 2, dan nomor list harus
+                    # sama dengan induk (bila keduanya ada).
+                    if not parent.get("is_heading"):
+                        continue
+                    if lvl != 2:
+                        continue
+                    if (parent.get("numId") is not None
+                            and nid is not None
+                            and parent.get("numId") != nid):
+                        continue
             add(text, lvl, "sub", i, bold=False, term=term,
-                ilvl=ilvl, indent=ind, numId=_numId(p), lp_bold=bold)
+                ilvl=ilvl, indent=ind, numId=nid, lp_bold=bold,
+                is_heading=False)
             continue
         # --- Heading grup NON-BOLD: paragraf pendek yang langsung
         # diikuti sub a./b./c. (mis. "Teori Pelestarian"). ---
@@ -835,6 +948,21 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
     Kembalikan jumlah halaman TOC yang disisipkan tidak diketahui di
     sini — diukur oleh pemanggil."""
     doc = Document(src_path)
+    # v0.6.6: judul bagian yang ditempel sebelum BAB-nya (pending)
+    # jangan sampai tertinggal di akhir halaman daftar isi — mulai
+    # di halaman baru bersama BAB-nya (page_break_before). keepNext
+    # tidak mempan di LibreOffice karena ada section break di judul
+    # BAB. Hanya untuk entri bertanda break_before; dokumen lain
+    # tidak tersentuh.
+    for e in entries:
+        if not e.get("break_before"):
+            continue
+        _pi = e.get("para_index")
+        if _pi is None or not (0 <= _pi < len(doc.paragraphs)):
+            continue
+        if norm(doc.paragraphs[_pi].text) != e["text"]:
+            continue
+        doc.paragraphs[_pi].paragraph_format.page_break_before = True
     sec = doc.sections[0]
     usable_twips = int(
         (sec.page_width - sec.left_margin - sec.right_margin) / 635
