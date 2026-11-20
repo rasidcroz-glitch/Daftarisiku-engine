@@ -83,7 +83,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.15"  # v0.6.15: settings updateFields=true — Word menghitung ulang field PAGE saat buka, jadi nomor Romawi/Arab tidak lagi tampil '1' semua. v0.6.14: (1) isi BAB I mengalir di halaman judul pada jalur paksa (revisi nifas __1: run break halaman sesudah sectPr penutup hanya bila sectPr dipindah, bukan pada jalur _forced_title); (2) BAB II-V nomor halaman pertama di tengah: titlePg tidak bisa diandalkan bila section BAB-nya continuous (LibreOffice memakai footer section paragraf PERTAMA halaman judul — sering paragraf kosong di section sebelumnya — jadi footer default section sebelumnya yang pendek dan kosong itu juga dibuat tengah) + "mulai di halaman baru" dinilai juga dari sinyal struktural, bukan hanya render PDF pra-footer (Light Cloud: BAB II-IV bab_new_pages False)
+VERSION = "0.6.16"  # v0.6.16: (1) _remove_old_toc_runs kini mempertahankan batas section bila pgNumType-nya beda dengan section berikut (batas Romawi->Arab) — proposal Gunak: halaman depan kembali Romawi, BAB I restart "1"; (2) entri sesudah DAFTAR PUSTAKA tidak lagi jadi butir daftar isi (referensi pendek lolos gerbang 'short'). v0.6.15: settings updateFields=true — Word menghitung ulang field PAGE saat buka, jadi nomor Romawi/Arab tidak lagi tampil '1' semua.
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 

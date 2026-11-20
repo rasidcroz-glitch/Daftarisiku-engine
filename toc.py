@@ -340,6 +340,17 @@ def _remove_old_toc_runs(doc):
     # __1: section daftar isi 1 kolom, section isi 2 kolom (beda,
     # dipertahankan). Gunak: semua section 1 kolom (sama, dihapus
     # seperti semula — footer BAB I tetap "6").
+    # v0.6.16: batas section JUGA dipertahankan bila penomoran
+    # halamannya (w:pgNumType fmt/start) berbeda dengan section
+    # berikut — itu batas Romawi->Arab. Proposal Gunak: section
+    # halaman depan lowerRoman, section BAB I restart Arab (start=1,
+    # fmt kosong); paragraf kosong pembawa sectPr itu dihapus di
+    # v0.6.13 sehingga keduanya menyatu jadi satu section decimal —
+    # halaman depan ikut Arab (2,3,4...) dan BAB I jadi "7", bukan
+    # "1", dan label daftar isi (yang dihitung dengan skema
+    # Romawi+restart) meleset 5-6 dari footer. Mempertahankan
+    # paragraf kosong itu tidak menambah halaman (satu baris kosong
+    # sesudah daftar isi, sama seperti pola nifas __1).
     def _cols_of(sectPr):
         if sectPr is None:
             return 1
@@ -350,12 +361,22 @@ def _remove_old_toc_runs(doc):
             return int(c.get(qn("w:num")) or 1)
         except (ValueError, TypeError):
             return 1
+    def _pgnum_of(sectPr):
+        if sectPr is None:
+            return ("-", "-")
+        pg = sectPr.find(qn("w:pgNumType"))
+        if pg is None:
+            return ("-", "-")
+        return (pg.get(qn("w:fmt")) or "-",
+                pg.get(qn("w:start")) or "-")
     _sec_cols = {}
+    _sec_pgnum = {}
     for _i, _q in enumerate(paras):
         _pp = _q._p.find(qn("w:pPr"))
         _sp = _pp.find(qn("w:sectPr")) if _pp is not None else None
         if _sp is not None:
             _sec_cols[_i] = _cols_of(_sp)
+            _sec_pgnum[_i] = _pgnum_of(_sp)
     _sec_sorted = sorted(_sec_cols)
     for p in doomed:
         pPr = p._p.find(qn("w:pPr"))
@@ -366,7 +387,10 @@ def _remove_old_toc_runs(doc):
             _pi = paras.index(p)
             _nxt = next((j for j in _sec_sorted if j > _pi), None)
             _next_cols = _sec_cols[_nxt] if _nxt is not None else 1
-            if _cols_of(_sp) != _next_cols:
+            _next_pgnum = (_sec_pgnum[_nxt] if _nxt is not None
+                           else ("-", "-"))
+            if (_cols_of(_sp) != _next_cols
+                    or _pgnum_of(_sp) != _next_pgnum):
                 # Pertahankan batas section: kosongkan run-nya saja
                 # (teks hilang, batas tetap). Bila elemennya dihapus,
                 # batas hilang dan daftar isi menyatu ke section
@@ -526,6 +550,11 @@ def extract_structure(docx_path):
     consumed = set()
     seen_bab = False
     in_lampiran = False
+    # v0.6.16: sesudah DAFTAR PUSTAKA, isi berikutnya adalah butir
+    # referensi ("Danim, Sudarman. 2002...", "Isi, D. (2024)...") —
+    # List Paragraph pendek (<=70 karakter) yang lolos gerbang
+    # 'short' dan jadi entri daftar isi. Itu bukan sub-bab.
+    in_pustaka = False
     toc_anchor_idx = None
     # Penghitung untuk keputusan level pada awalan angka eksplisit
     # ("2. ..." -> level 2 bila melanjutkan urutan sub-sub, level 3
@@ -669,6 +698,7 @@ def extract_structure(docx_path):
         m_bab = RE_BAB.match(text)
         if m_bab:
             seen_bab = True
+            in_pustaka = False  # BAB sesudah pustaka (jarang) buka lagi
             roman = m_bab.group(1).upper()
             disp = text.upper()
             search = [("text", text)]
@@ -718,15 +748,19 @@ def extract_structure(docx_path):
         # --- penutup: pustaka & lampiran ---
         if upper == "DAFTAR PUSTAKA":
             add(upper, 0, "pustaka", i, bold=False)
+            in_pustaka = True  # v0.6.16: referensi sesudahnya bukan entri
             continue
         if upper == "DAFTAR LAMPIRAN":
             add(upper, 0, "pustaka", i, bold=False)
             in_lampiran = True
+            in_pustaka = False
             continue
         if in_lampiran:
             if RE_LAMPIRAN.match(text):
                 add(text, 1, "lampiran", i, bold=False)
             continue
+        if in_pustaka:
+            continue  # v0.6.16: butir referensi, bukan sub-bab
         if RE_CAPTION.match(text):
             continue  # caption gambar/tabel ditangani extract_captions
         # --- sub-bab: Heading 3 (tanpa huruf -> diberi A./B./C.) ---
@@ -1903,7 +1937,17 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     _has_front = any(
         norm(doc.paragraphs[_i].text) in _front_markers
         for _i in range(_sec_start, bab_j))
-    if not _has_front and not force_bab1_page_break:
+    # v0.6.16: jangan tambah sectPr continuous bila BAB I SUDAH
+    # paragraf pertama section-nya (break sudah ada di paragraf
+    # sebelumnya, mis. proposal Gunak: sectPr nextPage di paragraf
+    # kosong sesudah DAFTAR ISI, dipertahankan v0.6.16). Menambahnya
+    # membuat section 1-paragraf berisi judul BAB I saja: judul
+    # terpisah dari "PENDAHULUAN" (orphan di akhir halaman daftar
+    # isi) dan footer "1" jadi kanan, bukan tengah (section Arab
+    # baru mulai di "PENDAHULUAN", bukan di judul). _sec_start ==
+    # bab_j berarti sectPr sebelumnya tepat sebelum BAB I.
+    if (not _has_front and not force_bab1_page_break
+            and _sec_start != bab_j):
         pPr = bab_para._p.get_or_add_pPr()
         if pPr.find(qn("w:sectPr")) is None:
             pPr.append(_new_sectPr_from(body_sectPr))
