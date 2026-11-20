@@ -2741,12 +2741,18 @@ def process(docx_path, work_dir, include_lists=True):
     footer_forced = False
     bab1_footer = None
     pages_final = total_out
+    # v0.6.20: PDF hasil akhir (untuk pilihan download PDF) — render
+    # yang cocok dengan out_docx final: pdf1 (akhir1, normal) atau
+    # pdf3 (akhir3, bila retry paksa berhasil). pdf_out TIDAK dipakai
+    # (itu render sebelum footer pass, tanpa nomor halaman footer).
+    final_pdf = None
     try:
         attempt1 = os.path.join(work_dir, "_attempt1.docx")
         shutil.copy(out_docx, attempt1)
         akhir1 = os.path.join(work_dir, "_akhir1.docx")
         shutil.copy(out_docx, akhir1)
         pdf1 = render_pdf(akhir1, work_dir)
+        final_pdf = pdf1
         pages1 = len(pdf_pages_text(pdf1))
         pages_final = pages1
         bab1_footer = _bab1_footer_text(pdf1, entries)
@@ -2807,6 +2813,7 @@ def process(docx_path, work_dir, include_lists=True):
                     footer_forced = True
                     bab1_footer = foot3
                     pages_final = pages3
+                    final_pdf = pdf3
                     # Label sudah dihitung ulang + rebuild: verifikasi
                     # laporan harus dari render akhir (pdf3), bukan
                     # pdf_out — judul BAB I terbelah huruf per huruf
@@ -2832,6 +2839,7 @@ def process(docx_path, work_dir, include_lists=True):
         "daftar_tabel": tabel,
         "toc_text": format_toc_text(entries),
         "output_docx": out_docx,
+        "output_pdf": final_pdf,
         "pages_in": total_in,
         "pages_out": total_out,
         "pages_final": pages_final,

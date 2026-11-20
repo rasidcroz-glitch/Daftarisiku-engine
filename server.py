@@ -99,7 +99,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.19"  # v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
+VERSION = "0.6.20"  # v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
@@ -384,6 +384,9 @@ def _toc_result_payload(rep, job):
         "pages_out": rep["pages_out"],
         "verification": "lolos" if not rep["mismatches"] else rep["mismatches"],
         "download_url": f"/api/download/{job}",
+        # v0.6.20: satu bayar Rp15.000 membuka Word DAN PDF.
+        "download_pdf_url": (f"/api/download/{job}?format=pdf"
+                             if rep.get("output_pdf") else None),
         "download_expires_hours": JOB_TTL_SECONDS // 3600,
     }
 
@@ -399,6 +402,15 @@ def _job_worker():
                           include_lists=item["include_lists"])
             out_path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
             shutil.move(rep["output_docx"], out_path)
+            # v0.6.20: simpan juga PDF hasil akhir (render yang cocok
+            # dengan docx final) supaya satu bayar membuka Word DAN PDF.
+            pdf_src = rep.get("output_pdf")
+            if pdf_src and os.path.exists(pdf_src):
+                try:
+                    shutil.move(pdf_src, os.path.join(
+                        RESULTS_DIR, f"{job}-hasil-daftar-isi.pdf"))
+                except OSError:
+                    pass
             # v0.6.7: simpan nama file asli supaya nama download mengikuti
             # file yang di-upload (bukan "skripsi-daftar-isi.docx" terus).
             try:
@@ -744,7 +756,10 @@ def status(job):
 def download(job):
     if not job.isalnum() or len(job) > 32:
         return jsonify({"error": "job tidak valid"}), 400
-    path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
+    # v0.6.20: ?format=pdf mengunduh PDF (satu bayar membuka keduanya).
+    want_pdf = (request.args.get("format", "") or "").lower() == "pdf"
+    suffix = "pdf" if want_pdf else "docx"
+    path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.{suffix}")
     if not os.path.exists(path):
         return jsonify({"error": "hasil tidak ditemukan atau sudah kedaluwarsa (24 jam)"}), 404
     if job not in load_paid():
@@ -762,6 +777,8 @@ def download(job):
         dl_name = secure_filename(orig) or "skripsi.docx"
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
+    if want_pdf:
+        dl_name = (dl_name[:-5] + ".pdf") if dl_name.lower().endswith(".docx") else (dl_name + ".pdf")
     return send_file(path, as_attachment=True,
                      download_name=dl_name)
 
