@@ -1825,15 +1825,22 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     hanya disisipkan bila sectPr dipindah (_moved); pada jalur
     paksa (_forced_title) break itu justru memisahkan judul +
     sub-heading dari isi babnya (revisi __1: isi mengalir di
-    halaman judul). (2) Pengecualian atas "TIDAK ada section
-    break baru": BAB II+ yang section-nya continuous DIBELAH
-    tepat sebelum judulnya (sectPr continuous baru, bukan
-    nextPage) supaya titlePg berlaku di halaman judul; dan
-    "mulai di halaman baru" juga dinilai dari sinyal struktural
-    (judul = paragraf pertama section, atau section mulai di
-    halaman baru menurut sectPr), bukan hanya dari render PDF
-    pra-footer yang berbeda antar mesin (Light Cloud: BAB II-IV
-    bab_new_pages False sehingga titlePg tidak dipasang).
+    halaman judul). (2) BAB yang section-nya continuous: titlePg
+    tidak bisa diandalkan (LibreOffice mengabaikannya, lokal
+    maupun live — BAB V __1 tetap kanan). Ternyata LibreOffice
+    memakai footer section yang memuat paragraf PERTAMA halaman
+    judul, dan itu sering berupa paragraf kosong di section
+    SEBELUMNYA, jadi footer default section sebelumnya yang
+    pendek dan kosong itu juga dibuat tengah; section sesudahnya
+    dikembalikan ke kanan.
+    (3) "mulai di halaman baru" juga dinilai dari sinyal
+    struktural (judul = paragraf pertama section, atau section
+    mulai di halaman baru menurut sectPr), bukan hanya dari
+    render PDF pra-footer yang berbeda antar mesin (Light Cloud:
+    BAB II-IV bab_new_pages False sehingga titlePg tidak
+    dipasang). Belah section (percobaan awal v0.6.14) DIBATALKAN:
+    section baru hasil belahan perilakunya tidak deterministik
+    antar render LibreOffice.
     Kembalikan True bila batas BAB I ditemukan (Romawi -> Arab)."""
     doc = Document(out_path)
     # Cari paragraf judul tiap BAB (kenal judul telanjang "BAB I" yang
@@ -2023,13 +2030,9 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
                 _r.append(_br)
                 _nxt._p.insert(0, _r)
 
-    # --- BAB II+: v0.6.14 — break baru HANYA bila perlu (lihat
-    # belah section di atas): sectPr continuous di paragraf tepat
-    # sebelum judul BAB yang section-nya continuous, supaya judul
-    # jadi paragraf pertama section baru. Selain itu TIDAK ada
-    # break baru (lihat docstring). Yang dibutuhkan hanya peta
-    # "BAB ini mulai di halaman baru?" untuk menentukan section
-    # mana yang diberi titlePg di bawah. ---
+    # --- BAB II+: TIDAK ada break baru (lihat docstring). Yang
+    # dibutuhkan hanya peta "BAB ini mulai di halaman baru?" untuk
+    # menentukan section mana yang diberi titlePg di bawah. ---
     bab_entries = [e for e in entries if e.get("kind") == "bab"]
     starts_by_entry = {}
     if bab_new_pages is not None:
@@ -2041,54 +2044,6 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         if starts is None:
             starts = _bab_starts_new_page(doc, para, j)
         bab_new_by_id[id(para._p)] = bool(starts)
-
-    # --- v0.6.14: belah section BAB II+ yang mulai continuous ---
-    # Judul BAB yang BUKAN paragraf pertama section-nya DAN
-    # section-nya bertipe continuous tidak mendapat titlePg yang
-    # berlaku di halaman judul: halaman pertama section itu adalah
-    # halaman berisi paragraf pertama section (bisa halaman
-    # sebelumnya), bukan halaman judul. Solusi: sisipkan sectPr
-    # continuous di paragraf tepat sebelum judul, sehingga judul
-    # menjadi paragraf pertama section baru yang halaman pertamanya
-    # adalah halaman judul — tanpa menambah halaman (break
-    # continuous, bukan nextPage) dan tanpa mengubah layout
-    # (layout disalin dari sectPr section BAB itu sendiri).
-    # Hanya BAB II+ (BAB I ditangani v0.6.11/v0.6.13 di atas) dan
-    # hanya bila paragraf sebelum judul belum punya sectPr sendiri
-    # (bila sudah punya, judul sudah paragraf pertama section).
-    _bab_ids = {id(para._p) for _, para, _ in bab_paras[1:]}
-    _sec_of = {}
-    _first_of_sec = {}
-    _sp_of_sec = {}
-    _si = 0
-    for _ch in body.iterchildren():
-        if _ch.tag != qn("w:p"):
-            continue
-        if _si not in _first_of_sec:
-            _first_of_sec[_si] = _ch
-        if id(_ch) in _bab_ids:
-            _sec_of[id(_ch)] = _si
-        _pp = _ch.find(qn("w:pPr"))
-        _sp = _pp.find(qn("w:sectPr")) if _pp is not None else None
-        if _sp is not None:
-            _sp_of_sec[_si] = _sp
-            _si += 1
-    if body_sectPr is not None:
-        _sp_of_sec[_si] = body_sectPr
-    for _entry, _para, _j in bab_paras[1:]:
-        _si = _sec_of.get(id(_para._p))
-        if _si is None or _first_of_sec.get(_si) is _para._p:
-            continue
-        _sp = _sp_of_sec.get(_si)
-        if _sp is None or _sectPr_break_is_new_page(_sp):
-            continue
-        if _j <= 0:
-            continue
-        _prev = doc.paragraphs[_j - 1]
-        _prev_pPr = _prev._p.get_or_add_pPr()
-        if _prev_pPr.find(qn("w:sectPr")) is not None:
-            continue
-        _prev_pPr.append(_new_sectPr_from(_sp))
 
     # --- petakan ulang: section tempat paragraf BAB I berada, dan
     # paragraf pertama tiap section (untuk footer tengah halaman BAB).
@@ -2195,9 +2150,9 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     # bab_new_pages False, titlePg tidak dipasang, footer kanan).
     # Karena itu sinyal struktural ikut dipakai: judul adalah
     # paragraf pertama section-nya (halaman pertama section itu
-    # PASTI halaman judul, mis. sesudah dibelah di atas), atau
-    # section-nya mulai di halaman baru menurut sectPr (bukan
-    # continuous). Sinyal PDF tetap dipakai bila True.
+    # PASTI halaman judul), atau section-nya mulai di halaman
+    # baru menurut sectPr (bukan continuous). Sinyal PDF tetap
+    # dipakai bila True.
     centered = set()
     for i, fp in enumerate(sec_first_text):
         if i < body_idx or fp is None or id(fp) not in bab_new_by_id:
@@ -2213,6 +2168,64 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     for i in sorted(centered):
         if i < len(doc.sections):
             _ensure_bab_first_page_footer(doc.sections[i])
+    # v0.6.14: section BAB yang continuous — titlePg tidak bisa
+    # diandalkan di sana (LibreOffice mengabaikannya, lokal
+    # maupun live — BAB V __1 tetap kanan). Penyebab sebenarnya
+    # (terbukti lewat uji marker footer): LibreOffice memakai
+    # footer section yang memuat paragraf PERTAMA halaman judul,
+    # dan paragraf pertama itu sering berupa paragraf KOSONG di
+    # section SEBELUMNYA (revisi __1: hal. 29 BAB V diawali para
+    # kosong 519-520 di sec 31, jadi footernya footer sec 31
+    # yang kanan — bukan footer sec 32 tempat judul berada).
+    # Karena itu footer DEFAULT section sebelumnya yang pendek
+    # dan isinya kosong semua (<= 3 paragraf, semuanya kosong —
+    # sec 31 __1 hanya 2 paragraf kosong, jadi hanya dipakai
+    # halaman judul itu) juga dibuat tengah; bila section itu
+    # punya titlePg, footer pertamanya juga ditengahkan.
+    # Footer default section BAB itu sendiri juga dibuat tengah
+    # (cadangan). Section sesudahnya dikembalikan ke kanan
+    # (footer default mereka tertaut ke section ini, jadi ikut
+    # tengah bila dibiarkan). Belah section (percobaan awal
+    # v0.6.14) DIBATALKAN: section baru hasil belahan perilakunya
+    # tidak deterministik antar render LibreOffice (kadang tengah,
+    # kadang kanan).
+    _para_j = {id(p._p): j for j, p in enumerate(doc.paragraphs)}
+    _cont_secs = set()
+    for i, fp in enumerate(sec_first_text):
+        if i < body_idx or fp is None or id(fp) not in bab_new_by_id:
+            continue
+        if _sectPr_break_is_new_page(doc.sections[i]._sectPr):
+            continue
+        _cont_secs.add(i)
+        _ensure_footer_number_on(
+            doc.sections[i].footer, WD_ALIGN_PARAGRAPH.CENTER)
+        # Section sebelumnya (paragraf kosong di atas judul):
+        # paragrafnya dari paragraf pertama section itu sampai
+        # paragraf sebelum paragraf pertama section BAB ini.
+        if i - 1 >= body_idx and sec_first[i - 1] is not None \
+                and sec_first[i] is not None:
+            _a = _para_j.get(id(sec_first[i - 1]))
+            _b = _para_j.get(id(sec_first[i]))
+            if _a is not None and _b is not None and _b - _a <= 3:
+                _all_empty = all(
+                    not doc.paragraphs[_k].text.strip()
+                    for _k in range(_a, _b))
+                if _all_empty:
+                    _cont_secs.add(i - 1)
+                    _ensure_footer_number_on(
+                        doc.sections[i - 1].footer,
+                        WD_ALIGN_PARAGRAPH.CENTER)
+                    _sp_prev = doc.sections[i - 1]._sectPr
+                    if _sp_prev.find(qn("w:titlePg")) is not None:
+                        _ensure_bab_first_page_footer(
+                            doc.sections[i - 1],
+                            WD_ALIGN_PARAGRAPH.CENTER)
+    for i, s in enumerate(doc.sections):
+        if i in _cont_secs:
+            continue
+        _align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
+                  else WD_ALIGN_PARAGRAPH.RIGHT)
+        _ensure_footer_number_on(s.footer, _align)
     # Hapus titlePg LIAR dari section lain (kecuali cover sec 0):
     # titlePg warisan sumber pada section yang paragraf pertamanya
     # BUKAN BAB yang mulai di halaman baru akan menengahkan halaman
