@@ -1307,6 +1307,35 @@ def _relax_list_heading_break(heading_para, doc):
     _normalize_sectPr_order(sectPr)
 
 
+def _drop_list_heading_sectPr(heading_para, doc):
+    """v0.6.24: hapus sectPr heading daftar (DAFTAR ISI) bila format
+    nomor (pgNumType fmt) section yang diakhirinya sama dengan section
+    sesudahnya, supaya judul menyatu ke section entrinya dan tidak
+    yatim di halaman sendiri (UJI_COBA_2: judul di halaman sendiri
+    dengan footer Arab "10", entri di halaman berikut). Pola yang sama
+    dipakai BAB I di add_footer_page_numbers. Bila format beda atau
+    tidak ada sectPr, kembalikan False (pemanggil memakai
+    _relax_list_heading_break sebagai gantinya)."""
+    pPr = heading_para._p.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    sectPr = pPr.find(qn("w:sectPr"))
+    if sectPr is None:
+        return False
+    sections = list(doc.sections)
+    idx = None
+    for i, s in enumerate(sections):
+        if s._sectPr is sectPr:
+            idx = i
+            break
+    if idx is None or idx + 1 >= len(sections):
+        return False
+    if _pgnum_fmt(sectPr) != _pgnum_fmt(sections[idx + 1]._sectPr):
+        return False
+    pPr.remove(sectPr)
+    return True
+
+
 def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
                       normalize_pre_bab=False):
     """Sisipkan daftar isi setelah heading 'DAFTAR ISI' (atau sebelum
@@ -1454,8 +1483,16 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
     # satu halaman oleh section break nextPage (lihat
     # _relax_list_heading_break). Hanya bila heading itu dari dokumen
     # sumber (toc_para); judul yang baru dibuat tidak membawa sectPr.
+    # v0.6.24: break continuous saja tidak cukup — judul yang membawa
+    # sectPr sendiri tetap yatim di halaman sendiri (UJI_COBA_2:
+    # judul di halaman sendiri, footer jadi Arab "10"). Hapus sectPr
+    # judul bila format nomor sama (lihat _drop_list_heading_sectPr),
+    # lalu mulai daftar isi di halaman baru, sama seperti DAFTAR
+    # GAMBAR/TABEL di bawah.
     if toc_para is not None:
-        _relax_list_heading_break(toc_para, doc)
+        if not _drop_list_heading_sectPr(toc_para, doc):
+            _relax_list_heading_break(toc_para, doc)
+        _page_break_before(toc_para)
 
     # --- 2. Daftar gambar (setelah daftar isi, atau setelah heading
     # 'DAFTAR GAMBAR' bila dokumen sudah punya) ---
