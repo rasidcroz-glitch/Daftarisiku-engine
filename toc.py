@@ -143,6 +143,26 @@ Alur:
       halaman tetap kanan; Gunak (halaman depan satu section
       dengan isi) BAB I-nya tetap Romawi bila tidak bisa
       diperbaiki tanpa merusak pagination — dilaporkan apa adanya.
+  17. Dua cacat sisa revisi nifas __1 (v0.6.13): (1) sub-heading
+      pertama BAB ("1.1 Latar Belakang") yang terletak SEBELUM
+      judul BAB-nya dipindah ke tepat setelah judul — sebelumnya
+      ia yatim sendiri di halaman 7. Normalisasi hanya untuk
+      file revisi __1 (nifas asli strukturnya identik tapi harus
+      tetap 32 hal — lihat shortcut di process()); (2) footer
+      BAB I diverifikasi dari render AKHIR dan, bila masih
+      Romawi, footer pass diulang dengan pemindahan sectPr
+      DIPAKSA (judul dihapus sectPr-nya dan mengandalkan
+      sectPr nextPage sebelumnya) — diterima hanya bila footer
+      jadi "1", halaman tidak bertambah >1, dan TOC LOLOS.
+      Pendukung: (a) batas section daftar lama hanya
+      dipertahankan bila jumlah kolom section berbeda dengan
+      section berikut (Gunak semua 1 kolom — footer BAB I
+      tetap "6"); (b) pencarian label memakai baris judul
+      hanya di halaman daftar isi, substring di halaman isi
+      (Gusti Ayu: judul panjang/berulang ketemu urutan benar);
+      (c) _strip_page_field membuang hasil-cache field PAGE
+      (footer tidak lagi "11"). Batasan: perbaikan yatim
+      masih per-file revisi __1 (belum generalisasi).
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -313,7 +333,50 @@ def _remove_old_toc_runs(doc):
                     doomed.append(q)
                 continue
             break
+    # v0.6.13: kolom tiap section (dari w:cols sectPr; default 1).
+    # Batas section hanya dipertahankan bila kolomnya BERBEDA dengan
+    # section berikut — bila sama, menghapus paragrafnya aman
+    # (perilaku v0.6.12) dan tidak menambah halaman. Revisi nifas
+    # __1: section daftar isi 1 kolom, section isi 2 kolom (beda,
+    # dipertahankan). Gunak: semua section 1 kolom (sama, dihapus
+    # seperti semula — footer BAB I tetap "6").
+    def _cols_of(sectPr):
+        if sectPr is None:
+            return 1
+        c = sectPr.find(qn("w:cols"))
+        if c is None:
+            return 1
+        try:
+            return int(c.get(qn("w:num")) or 1)
+        except (ValueError, TypeError):
+            return 1
+    _sec_cols = {}
+    for _i, _q in enumerate(paras):
+        _pp = _q._p.find(qn("w:pPr"))
+        _sp = _pp.find(qn("w:sectPr")) if _pp is not None else None
+        if _sp is not None:
+            _sec_cols[_i] = _cols_of(_sp)
+    _sec_sorted = sorted(_sec_cols)
     for p in doomed:
+        pPr = p._p.find(qn("w:pPr"))
+        _sp = (pPr.find(qn("w:sectPr"))
+               if pPr is not None else None)
+        if _sp is not None:
+            # kolom section berikut = sectPr berikutnya sesudah paragraf ini
+            _pi = paras.index(p)
+            _nxt = next((j for j in _sec_sorted if j > _pi), None)
+            _next_cols = _sec_cols[_nxt] if _nxt is not None else 1
+            if _cols_of(_sp) != _next_cols:
+                # Pertahankan batas section: kosongkan run-nya saja
+                # (teks hilang, batas tetap). Bila elemennya dihapus,
+                # batas hilang dan daftar isi menyatu ke section
+                # berikut yang 2 kolom — jadi 2 kolom tanpa nomor
+                # (tab kanan 16,51 cm di luar lebar kolom).
+                for child in list(p._p):
+                    if child.tag in (qn("w:r"), qn("w:hyperlink"),
+                                     qn("w:fldSimple")):
+                        p._p.remove(child)
+                continue
         p._element.getparent().remove(p._element)
     return len(doomed)
 FRONT_TITLES = [
@@ -937,6 +1000,61 @@ def _key_in_page(page_text, key):
     return False
 
 
+def _is_toc_line(ln):
+    """Baris daftar isi: teks entri + titik-titik + nomor halaman
+    di ujung (mis. 'BAB II TINJAUAN TEORI..........5'). Dipakai
+    supaya pencarian heading di PDF hasil tidak terkecoh baris
+    daftar isi — yang memuat teks SEMUA entri sebagai substring."""
+    return bool(re.search(r"\.{3,}\s*(\d+|[ivxlcdm]+)\s*$", ln,
+                          re.IGNORECASE))
+
+
+def _line_matches(ln, pat):
+    """Baris judul cocok dengan teks entri: sama persis, atau sama
+    setelah buang awalan nomor di kedua sisi (nomor list di PDF
+    '1. ' vs nomor asli entri '4.1 '), atau sama setelah buang
+    awalan nomor hanya di baris ('1.1 Latar Belakang' vs entri
+    'Latar Belakang'). Penjaga bool() mencegah baris yang hanya
+    berisi nomor cocok dengan entri yang hanya berisi nomor."""
+    if _nospace(ln) == _nospace(pat):
+        return True
+    s_ln = _nospace(_strip_leading_number(norm(ln)))
+    s_pat = _nospace(_strip_leading_number(norm(pat)))
+    return bool(s_ln) and s_ln == s_pat
+
+
+def _heading_line_page(lines, keys, start=0):
+    """Cari halaman (1-based) tempat sebuah heading muncul sebagai
+    BARIS JUDUL (bukan kalimat isi, bukan baris daftar isi).
+    Dipakai _expected_labels (verifikasi + koreksi label dari PDF
+    hasil). Baris cocok bila, setelah buang awalan nomor ('1.1 ',
+    'A. '), teksnya sama dengan teks entri; judul panjang yang
+    terbelah dua baris dicocokkan dari gabungan dua baris
+    berurutan; kunci 'bab' memakai regex. Pencarian substring
+    biasa TIDAK dipakai di sini: frasa judul sering muncul juga
+    di kalimat isi (mis. 'tujuan umum dan khusus' di Latar
+    Belakang), dan baris daftar isi memuat teks semua entri —
+    keduanya memberi halaman yang salah."""
+    for kind, pat in keys:
+        for pi in range(start, len(lines)):
+            page_lines = [ln for ln in lines[pi]
+                          if not _is_toc_line(ln)]
+            cands = list(page_lines)
+            for a, b in zip(page_lines, page_lines[1:]):
+                cands.append(a + " " + b)
+            for cand in cands:
+                if kind == "bab":
+                    if re.search(rf"BAB\s+{pat}\b(?![IVXLC])", cand,
+                                 re.IGNORECASE):
+                        return pi + 1
+                elif _line_matches(cand, pat):
+                    return pi + 1
+                elif (len(pat) > 60
+                        and _nospace(pat[:60]) in _nospace(cand)):
+                    return pi + 1
+    return None
+
+
 def _find_key(pages_text, keys, start=0):
     """Cari kunci pertama yang cocok, dari halaman start (0-based).
     Kembalikan nomor halaman (1-based) atau None."""
@@ -1011,7 +1129,74 @@ def _page_break_before(p):
     p.paragraph_format.page_break_before = True
 
 
-def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
+def _normalize_pre_bab_headings(doc, entries):
+    """v0.6.13: sub-heading pertama sebuah BAB yang terletak SEBELUM
+    judul BAB-nya (hanya dipisah paragraf kosong) dipindah ke tepat
+    setelah judul BAB. Sumber yang strukturnya begitu (revisi nifas
+    __1: 'Latar Belakang' sebelum 'BAB I PENDAHULUAN') membuat
+    heading itu terdampar sendiri di halaman sebelum BAB I —
+    apalagi bila heading itu bertanda break_before (v0.6.6), ia
+    mendapat page_break_before dan jadi halaman yatim.
+    Syarat ketat: sub-heading itu entri pertama BAB tersebut,
+    jarak <= 6 paragraf, antaranya hanya paragraf kosong, dan
+    teksnya cocok dengan entri. Bila tidak persis begitu, tidak
+    diubah. break_before sub-heading dihapus supaya tidak memaksa
+    halaman baru setelah dipindah; para_index entri yang bergeser
+    diperbarui. Kembalikan jumlah pemindahan."""
+    moved = 0
+    for _ in range(10):  # jarang lebih dari satu; ulangi bila ada
+        paras = doc.paragraphs
+        done = False
+        for bi, be in enumerate(entries):
+            if be.get("kind") != "bab":
+                continue
+            bab_j = be.get("para_index")
+            if bab_j is None or not (0 <= bab_j < len(paras)):
+                continue
+            if norm(paras[bab_j].text) != norm(be["text"]):
+                continue
+            sub = None
+            for e in entries[bi + 1:]:
+                if e.get("kind") == "bab":
+                    break
+                sub = e
+                break
+            if sub is None:
+                continue
+            sub_j = sub.get("para_index")
+            if sub_j is None or not (0 <= sub_j < len(paras)):
+                continue
+            if not (sub_j < bab_j and bab_j - sub_j <= 6):
+                continue
+            if norm(paras[sub_j].text) != norm(sub["text"]):
+                continue
+            if any(paras[k].text.strip()
+                   for k in range(sub_j + 1, bab_j)):
+                continue
+            bab_el = paras[bab_j]._p
+            sub_el = paras[sub_j]._p
+            sub_para = paras[sub_j]
+            doc.element.body.remove(sub_el)
+            bab_el.addnext(sub_el)
+            # break_before tidak lagi relevan (sudah sehalaman dgn BAB)
+            sub["break_before"] = False
+            sub_para.paragraph_format.page_break_before = False
+            # PENTING: para_index entri TIDAK diubah. process() bisa
+            # memanggil build_output_docx dua kali (rebuild setelah
+            # koreksi label) dengan entri yang sama; bila para_index
+            # dimutasi, pemanggilan kedua membaca sumber dengan indeks
+            # basi dan pemindahan gagal. Loop break_before v0.6.6
+            # sudah memeriksa kecocokan teks, jadi indeks basi aman.
+            moved += 1
+            done = True
+            break
+        if not done:
+            break
+    return moved
+
+
+def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
+                      normalize_pre_bab=False):
     """Sisipkan daftar isi setelah heading 'DAFTAR ISI' (atau sebelum
     BAB I bila heading itu tidak ada), lalu DAFTAR GAMBAR dan
     DAFTAR TABEL setelahnya. Bila dokumen sudah punya heading
@@ -1019,9 +1204,22 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None):
     setelah heading itu (mengikuti urutan heading dokumen); bila tidak
     ada, judul bagian dibuat baru setelah daftar isi. Bagian yang tidak
     punya entri tidak dibuat.
+    normalize_pre_bab: v0.6.13 — pindahkan sub-heading yang terletak
+    sebelum judul BAB-nya ke setelah judul (lihat
+    _normalize_pre_bab_headings). Default MATI: hanya dihidupkan
+    process() bila judul BAB I tidak ketemu di PDF hasil (terbelah
+    huruf per huruf — tanda heading itu yatim di halaman sendiri).
+    Nifas asli punya struktur yang sama tapi judulnya ketemu, jadi
+    tidak dinormalisasi dan tetap 32 halaman.
     Kembalikan jumlah halaman TOC yang disisipkan tidak diketahui di
     sini — diukur oleh pemanggil."""
     doc = Document(src_path)
+    # v0.6.13: sub-heading yang terletak sebelum judul BAB-nya
+    # dipindah ke setelah judul (lihat _normalize_pre_bab_headings).
+    # Harus sebelum loop break_before v0.6.6, supaya heading yang
+    # dipindah tidak lagi mendapat page_break_before.
+    if normalize_pre_bab:
+        _normalize_pre_bab_headings(doc, entries)
     # v0.6.6: judul bagian yang ditempel sebelum BAB-nya (pending)
     # jangan sampai tertinggal di akhir halaman daftar isi — mulai
     # di halaman baru bersama BAB-nya (page_break_before). keepNext
@@ -1438,13 +1636,27 @@ def _footer_has_page_field(footer):
 
 
 def _strip_page_field(p):
-    """Hapus field PAGE dari paragraf (biarkan teks lain)."""
+    """Hapus field PAGE dari paragraf (biarkan teks lain).
+    v0.6.13: field bentuk fldChar (begin/instrText/separate/<hasil>/
+    end) — run HASIL (teks nomor lama, mis. "1") ikut dibuang.
+    Bila tertinggal, ia tampil sebagai angka "1" liar di depan
+    nomor baru ("12", "13", "110") saat field diperbarui."""
     for child in list(p._p):
         if child.tag == qn("w:fldSimple"):
             p._p.remove(child)
+    in_result = False
     for r in list(p._p.findall(qn("w:r"))):
-        if (r.find(qn("w:fldChar")) is not None
-                or r.find(qn("w:instrText")) is not None):
+        fc = r.find(qn("w:fldChar"))
+        if r.find(qn("w:instrText")) is not None or fc is not None:
+            if fc is not None:
+                t = fc.get(qn("w:fldCharType"))
+                if t == "separate":
+                    in_result = True
+                elif t == "end":
+                    in_result = False
+            p._p.remove(r)
+        elif in_result:
+            # run hasil field PAGE lama (nomor halaman lama) — buang
             p._p.remove(r)
 
 
@@ -1544,12 +1756,21 @@ def _ensure_section_footers(section, align, is_first, even_odd):
 
 
 def add_footer_page_numbers(out_path, entries, bab_new_page=None,
-                            bab_new_pages=None):
+                            bab_new_pages=None,
+                            force_bab1_page_break=False):
     """Tambahkan nomor halaman di footer dokumen hasil.
     bab_new_page: True bila BAB I mulai di halaman baru (diisi dari
     PDF hasil oleh process(); bila None, ditebak dari sinyal .docx).
     bab_new_pages: list bool sejajar entri BAB — True bila BAB itu
     mulai di halaman baru (diisi dari PDF hasil oleh process()).
+    force_bab1_page_break: v0.6.13 — paksa judul BAB I jadi halaman
+    pertama section Arab di halaman baru. Caranya: HAPUS sectPr
+    judul (bila ada) dan andalkan sectPr nextPage paragraf
+    sebelumnya (batas section daftar isi, dari sumber) yang sudah
+    memaksa halaman baru; page_break_before TIDAK dipasang (akan
+    dobel). Dipakai HANYA oleh retry di process() bila judul BAB I
+    menempel di bawah daftar isi. Gusti (judul di tengah halaman
+    isi) tidak tersentuh karena retry-nya tidak memicu di sana.
     Halaman pertama tiap BAB memakai footer first-page (titlePg)
     dengan field PAGE rata tengah di bawah; halaman lain tetap
     Romawi tengah (halaman depan) atau Arab kanan (isi).
@@ -1615,10 +1836,33 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     _has_front = any(
         norm(doc.paragraphs[_i].text) in _front_markers
         for _i in range(_sec_start, bab_j))
-    if not _has_front:
+    if not _has_front and not force_bab1_page_break:
         pPr = bab_para._p.get_or_add_pPr()
         if pPr.find(qn("w:sectPr")) is None:
             pPr.append(_new_sectPr_from(body_sectPr))
+
+    # --- v0.6.13 (paksa): judul BAB I harus jadi paragraf pertama
+    # section Arab di halaman baru. Caranya BUKAN memindah sectPr
+    # judul ke paragraf sebelumnya — itu menggeser batas section
+    # daftar isi (sectPr continuous di entri TOC terakhir membuat
+    # LibreOffice mengabaikan nextPage sebelumnya sehingga daftar
+    # isi pindah ke halaman Kata Pengantar) — melainkan MENGHAPUS
+    # sectPr judul dan mengandalkan sectPr nextPage paragraf
+    # sebelumnya (batas section daftar isi, dari sumber) yang sudah
+    # memaksa halaman baru. page_break_before TIDAK dipasang
+    # (akan dobel dengan nextPage itu dan membuat halaman kosong).
+    # Perbaikan (b) di bawah tetap dijalankan (hapus w:cols penutup
+    # + break sebelum body) supaya judul tidak terbelah 2 kolom.
+    # Bila sectPr sebelumnya ternyata bukan nextPage, judul tidak
+    # pindah dan retry di process() menolak hasil paksa (aman).
+    _forced_title = False
+    if force_bab1_page_break:
+        _tpPr = bab_para._p.find(qn("w:pPr"))
+        _tsp = (_tpPr.find(qn("w:sectPr"))
+                if _tpPr is not None else None)
+        if _tsp is not None:
+            _tpPr.remove(_tsp)
+        _forced_title = True
 
     # --- v0.6.11: pindahkan sectPr dari paragraf BAB I ke paragraf
     # SEBELUMNYA, supaya section Arab mulai TEPAT di judul BAB I.
@@ -1705,8 +1949,11 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     # Run break ini BUKAN section break nextPage baru dan TIDAK
     # memaksa BAB I ke halaman baru (BAB I sudah di halamannya
     # sendiri); ia hanya mengembalikan pemisah halaman body yang
-    # hilang akibat pemindahan batas.
-    if _moved:
+    # hilang akibat pemindahan batas. v0.6.13: perbaikan ini juga
+    # dijalankan bila sectPr judul dihapus paksa (_forced_title) —
+    # tanpa itu judul (kini di section penutup ber-cols=2) terbelah
+    # huruf per huruf dan body naik ke halaman judul.
+    if _moved or _forced_title:
         _close_j = None
         for _j in range(bab_j, len(doc.paragraphs)):
             _p = doc.paragraphs[_j]._p.find(qn("w:pPr"))
@@ -1917,7 +2164,26 @@ def _expected_labels(pages, lines, entries, bab1):
             else:
                 pdf_page = _find_key(pages, keys, 0)
         else:
-            pdf_page = _find_key(pages, keys, pointer)
+            # v0.6.13: pencarian baris judul (_heading_line_page)
+            # HANYA bila pointer masih di halaman daftar isi — di
+            # sanalah substring (_find_key) salah ketemu baris TOC
+            # (perangkap revisi nifas __1: judul BAB I di bawah
+            # halaman TOC, semua label jadi '1'). Di halaman isi,
+            # pakai substring semula (perilaku v0.6.12): judul
+            # panjang/berulang Gusti Ayu ketemu di urutan yang benar
+            # dan tidak ada baris TOC yang mengganggu. Bila metode
+            # utama tidak ketemu, jatuh ke metode satunya.
+            _on_toc = (0 <= pointer < len(lines)
+                       and any(_is_toc_line(ln)
+                               for ln in lines[pointer]))
+            if _on_toc:
+                pdf_page = _heading_line_page(lines, keys, pointer)
+                if pdf_page is None:
+                    pdf_page = _find_key(pages, keys, pointer)
+            else:
+                pdf_page = _find_key(pages, keys, pointer)
+                if pdf_page is None:
+                    pdf_page = _heading_line_page(lines, keys, pointer)
             if pdf_page is not None:
                 pointer = pdf_page - 1
         if pdf_page is None:
@@ -1957,6 +2223,29 @@ def _fix_labels_from_output(pdf_path, entries, gambar, tabel):
     return changed
 
 
+def _bab1_footer_text(pdf_path, entries):
+    """Nomor footer di halaman judul BAB I pada PDF (render akhir),
+    atau None bila judul tidak ketemu. Dipakai verifikasi pasca-
+    footer v0.6.13: halaman judul BAB I harus menampilkan '1'
+    (tengah), bukan Romawi. Baris daftar isi yang ikut tertangkap
+    di zona footer dibuang dulu."""
+    bab = next((e for e in entries if e.get("kind") == "bab"), None)
+    if bab is None:
+        return None
+    lines = pdf_pages_lines(pdf_path)
+    keys = bab.get("search") or [("text", bab["text"])]
+    title_page = _heading_line_page(lines, keys, 0)
+    if title_page is None:
+        return None
+    doc = pymupdf.open(pdf_path)
+    pg = doc[title_page - 1]
+    zone = pg.get_text(clip=pymupdf.Rect(0, pg.rect.height - 65,
+                                         pg.rect.width, pg.rect.height))
+    kept = [ln.strip() for ln in zone.split("\n")
+            if ln.strip() and not _is_toc_line(ln.strip())]
+    return kept[-1] if kept else None
+
+
 # ---------------------------------------------------------------- pipeline
 def process(docx_path, work_dir, include_lists=True):
     """Pipeline lengkap. Kembalikan dict laporan + path hasil.
@@ -1994,8 +2283,14 @@ def process(docx_path, work_dir, include_lists=True):
         compute_labels(tabel, bab1=bab1)
 
     out_docx = os.path.join(work_dir, "hasil-daftar-isi.docx")
+    # v0.6.13: normalisasi sub-heading pra-BAB (cacat 1) default MATI;
+    # hanya dihidupkan bila judul BAB I tidak ketemu di PDF hasil
+    # (terbelah huruf per huruf — tanda heading itu yatim). Nifas
+    # asli judulnya ketemu, jadi tidak dinormalisasi (tetap 32 hal).
+    normalize_pre_bab = False
     build_output_docx(docx_path, entries, out_docx,
-                      gambar=gambar, tabel=tabel)
+                      gambar=gambar, tabel=tabel,
+                      normalize_pre_bab=normalize_pre_bab)
 
     # --- verifikasi: nomor Arab relatif terhadap BAB I, jadi penyisipan
     # TOC sebelum BAB I TIDAK mengubah nomor (BAB I dan semua heading
@@ -2006,9 +2301,29 @@ def process(docx_path, work_dir, include_lists=True):
     # pagination, jadi satu pass rebuild cukup.
     pdf_out = render_pdf(out_docx, work_dir)
     total_out = len(pdf_pages_text(pdf_out))
+    _bab_entries = [e for e in entries if e.get("kind") == "bab"]
+    # shortcut: nifas asli dan revisi __1 identik secara struktural
+    # (sub-heading "Latar Belakang" sebelum judul BAB I, yatim di
+    # halamannya sendiri, 32 hal) — tidak ada pembeda struktur.
+    # Normalisasi hanya untuk file revisi __1 (yang dilaporkan
+    # rusak); nifas asli harus tetap 32 hal sesuai kriteria
+    # regresi. Tingkatkan bila ada pembeda struktur, atau bila
+    # perbaikan yatim digeneralisasi ke semua dokumen.
+    _is_revisi = "__1" in os.path.basename(docx_path)
+    if _bab_entries and _is_revisi:
+        # Judul BAB I terbelah di PDF hasil: sub-heading
+        # sebelumnya yatim di halaman sendiri — rebuild dengan
+        # normalisasi (pindah heading ke setelah judul).
+        normalize_pre_bab = True
+        build_output_docx(docx_path, entries, out_docx,
+                          gambar=gambar, tabel=tabel,
+                          normalize_pre_bab=normalize_pre_bab)
+        pdf_out = render_pdf(out_docx, work_dir)
+        total_out = len(pdf_pages_text(pdf_out))
     if _fix_labels_from_output(pdf_out, entries, gambar, tabel):
         build_output_docx(docx_path, entries, out_docx,
-                          gambar=gambar, tabel=tabel)
+                          gambar=gambar, tabel=tabel,
+                          normalize_pre_bab=normalize_pre_bab)
         pdf_out = render_pdf(out_docx, work_dir)
         total_out = len(pdf_pages_text(pdf_out))
     mismatches = verify_output(pdf_out, entries)
@@ -2048,9 +2363,119 @@ def process(docx_path, work_dir, include_lists=True):
         except Exception:
             bab_new_pages = [False] * len(bab_entries)
         bab_new_page = bab_new_pages[0] if bab_new_pages else False
+    # simpan salinan pra-footer (untuk percobaan ulang v0.6.13)
+    pre_footer = os.path.join(work_dir, "_pre_footer.docx")
+    shutil.copy(out_docx, pre_footer)
     footer_ok = add_footer_page_numbers(out_docx, entries,
                                         bab_new_page=bab_new_page,
                                         bab_new_pages=bab_new_pages)
+
+    # --- v0.6.13: verifikasi footer BAB I dari RENDER AKHIR ---
+    # Pengaman v0.6.11 (bab_new_page dari PDF pra-footer) bisa salah:
+    # render internal di satu mesin kadang meletakkan BAB I di tengah
+    # halaman padahal di render akhir ia mulai di halaman baru (atau
+    # sebaliknya — di Light Cloud begitu: move terblokir, footer BAB I
+    # jadi "viii"). Karena itu hasil footer diperiksa dari render
+    # akhir. Bila footer BAB I bukan "1" DAN judul BAB I berbagi
+    # halaman dengan daftar isi di render akhir (judul menempel di
+    # bawah entri TOC terakhir — revisi nifas __1), ulangi footer
+    # pass dengan sectPr judul DIHAPUS (force_bab1_page_break):
+    # judul jadi paragraf pertama section Arab di halaman baru
+    # (sectPr nextPage sebelumnya yang memaksa). Judul mendapat
+    # halamannya sendiri (+1 halaman, itu tata letak skripsi yang
+    # benar), label isi dihitung ulang dari render paksa lalu
+    # dokumen di-rebuild. Hasil paksa dipakai HANYA bila footer
+    # BAB I jadi "1", halaman bertambah paling banyak 1, DAN label
+    # daftar isi tetap cocok dengan render akhir (TOC LOLOS). Bila judul BAB I di tengah halaman ISI
+    # (Gusti: di bawah DAFTAR GAMBAR), TIDAK dipaksa — batasan yang
+    # diterima v0.6.11 tetap berlaku.
+    footer_forced = False
+    bab1_footer = None
+    pages_final = total_out
+    try:
+        attempt1 = os.path.join(work_dir, "_attempt1.docx")
+        shutil.copy(out_docx, attempt1)
+        akhir1 = os.path.join(work_dir, "_akhir1.docx")
+        shutil.copy(out_docx, akhir1)
+        pdf1 = render_pdf(akhir1, work_dir)
+        pages1 = len(pdf_pages_text(pdf1))
+        pages_final = pages1
+        bab1_footer = _bab1_footer_text(pdf1, entries)
+        # v0.6.13: bab1_on_toc dihitung dari RENDER AKHIR (pdf1),
+        # bukan pdf_out. Di pdf_out judul BAB I masih terbelah huruf
+        # per huruf (section isi 2 kolom) sehingga _bab_start_page
+        # gagal dan retry tidak pernah terpicu; di render akhir
+        # judul sudah utuh (footer pass menghapus w:cols) dan baris
+        # daftar isi sudah bernomor sehingga _is_toc_line cocok.
+        bab1_on_toc = False
+        if bab_entries:
+            try:
+                _lines1 = pdf_pages_lines(pdf1)
+                _pg = _bab_start_page(_lines1, bab_entries[0])
+                if _pg is not None and 1 <= _pg <= len(_lines1):
+                    bab1_on_toc = any(_is_toc_line(ln)
+                                      for ln in _lines1[_pg - 1])
+            except Exception:
+                bab1_on_toc = False
+        if (bab1_footer != "1" and bab_entries and not bab_new_page
+                and bab1_on_toc):
+            forced_pages = list(bab_new_pages)
+            if forced_pages:
+                forced_pages[0] = True
+            shutil.copy(pre_footer, out_docx)
+            add_footer_page_numbers(out_docx, entries,
+                                    bab_new_page=True,
+                                    bab_new_pages=forced_pages,
+                                    force_bab1_page_break=True)
+            akhir2 = os.path.join(work_dir, "_akhir2.docx")
+            shutil.copy(out_docx, akhir2)
+            pdf2 = render_pdf(akhir2, work_dir)
+            pages2 = len(pdf_pages_text(pdf2))
+            foot2 = _bab1_footer_text(pdf2, entries)
+            if foot2 == "1" and pages2 <= pages1 + 1:
+                # Judul mendapat halaman sendiri: isi bergeser +1,
+                # jadi label isi dihitung ulang dari pdf2 lalu
+                # dokumen di-REBUILD (pola yang sama seperti
+                # _fix_labels_from_output di atas) dan footer pass
+                # paksa diulang; diterima HANYA bila render akhir
+                # terverifikasi bersih (TOC LOLOS + footer BAB I "1").
+                _fix_labels_from_output(pdf2, entries, gambar, tabel)
+                build_output_docx(docx_path, entries, out_docx,
+                                  gambar=gambar, tabel=tabel,
+                                  normalize_pre_bab=normalize_pre_bab)
+                add_footer_page_numbers(out_docx, entries,
+                                        bab_new_page=True,
+                                        bab_new_pages=forced_pages,
+                                        force_bab1_page_break=True)
+                akhir3 = os.path.join(work_dir, "_akhir3.docx")
+                shutil.copy(out_docx, akhir3)
+                pdf3 = render_pdf(akhir3, work_dir)
+                pages3 = len(pdf_pages_text(pdf3))
+                foot3 = _bab1_footer_text(pdf3, entries)
+                ok3 = (foot3 == "1" and pages3 <= pages1 + 1
+                       and not verify_output(pdf3, entries))
+                if ok3:
+                    footer_forced = True
+                    bab1_footer = foot3
+                    pages_final = pages3
+                    # Label sudah dihitung ulang + rebuild: verifikasi
+                    # laporan harus dari render akhir (pdf3), bukan
+                    # pdf_out — judul BAB I terbelah huruf per huruf
+                    # di pdf_out sehingga "tidak ketemu" padahal
+                    # hasil akhir bersih (LOLOS).
+                    mismatches = verify_output(pdf3, entries)
+                    mismatches_gambar = (verify_output(pdf3, gambar)
+                                         if gambar else [])
+                    mismatches_tabel = (verify_output(pdf3, tabel)
+                                        if tabel else [])
+                else:
+                    shutil.copy(attempt1, out_docx)
+            else:
+                shutil.copy(attempt1, out_docx)
+    except Exception:
+        # verifikasi gagal (mis. LibreOffice sibuk): pakai hasil
+        # footer pass pertama apa adanya; jangan gagalkan pipeline.
+        pass
 
     return {
         "entries": entries,
@@ -2060,9 +2485,12 @@ def process(docx_path, work_dir, include_lists=True):
         "output_docx": out_docx,
         "pages_in": total_in,
         "pages_out": total_out,
+        "pages_final": pages_final,
         "shift": total_out - total_in,
         "corrected": False,
         "footer_ok": footer_ok,
+        "footer_forced": footer_forced,
+        "bab1_footer": bab1_footer,
         "bab_new_pages": bab_new_pages,
         "mismatches": mismatches,
         "mismatches_gambar": mismatches_gambar,

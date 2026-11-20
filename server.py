@@ -83,7 +83,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.12"  # v0.6.12: deteksi daftar isi lama tidak lagi syarat gaya Normal/TOC — baris lama bergaya 'Body Text' (revisi nifas __1) kini ikut terhapus, bukan jadi entri duplikat
+VERSION = "0.6.13"  # v0.6.13: (1) sub-heading pra-BAB yang yatim dipindah ke setelah judul BAB (revisi nifas __1: "1.1 Latar Belakang" tidak lagi sendiri di hal. 7); (2) footer BAB I diverifikasi dari render akhir dan dipaksa jadi "1" bila masih Romawi; (3) batas section daftar lama hanya dipertahankan bila kolom section berbeda; (4) _strip_page_field kini membuang hasil-cache field PAGE (tidak ada lagi angka ganda "11" di footer)
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
