@@ -83,6 +83,66 @@ Alur:
       tertinggal di akhir halaman daftar isi (keepNext tidak mempan
       karena ada section break di judul BAB). Baris judul BAB boleh
       bergaya Heading 1/2, bukan hanya Normal.
+  15. Nomor halaman awal BAB di tengah bawah (v0.6.10): halaman
+      pertama tiap BAB memakai footer first-page (titlePg) dengan
+      field PAGE rata tengah; halaman lain tetap Romawi tengah
+      (halaman depan) atau Arab kanan (isi). TIDAK ada section break
+      baru dan TIDAK ada perubahan tipe break: nextPage sebelum BAB
+      terbukti merusak pagination di LibreOffice (memecah daftar
+      isi karena sectPr sumber tanpa w:type, halaman kosong karena
+      run break kolom jadi double break, judul terbelah dua kolom
+      karena section body sumber ber-cols 2). Sebagai gantinya,
+      titlePg hanya dipasang pada section YANG SUDAH ADA yang
+      paragraf berisi pertamanya adalah judul BAB yang mulai di
+      halaman baru — halaman pertama section itu memang halaman BAB,
+      jadi nomornya jadi di tengah tanpa mengubah pagination. BAB
+      yang bukan paragraf pertama section-nya (BAB I, BAB tengah
+      halaman) dibiarkan seperti semula. Tiga hal pendukung: (a)
+      cover dikosongkan SEBELUM footer tengah BAB dibuat — urutan
+      sebaliknya membuat LibreOffice menampilkan '1' di cover;
+      (b) titlePg LIAR warisan sumber dihapus dari section yang
+      paragraf pertamanya bukan BAB baru (mencegah halaman yang
+      salah jadi tengah); (c) sectPr continuous di BAB I hanya
+      ditambah bila section BAB I tidak memuat judul halaman depan
+      — tanpanya daftar isi nifas/Gusti pecah, dengannya halaman
+      depan Gunak bergeser. Sekalian diperbaiki: deteksi BAB kini
+      kenal judul BAB telanjang ("BAB I" + judul di baris berikut)
+      dan judul pending sebelum BAB I, sehingga Gunak (BAB
+      telanjang) dan nifas (pending "1.1 Latar Belakang") tidak
+      lagi jatuh ke fallback semua-tengah; dan section BAB mendapat
+      referensi footer 'first' SENDIRI (bukan tautan) karena
+      LibreOffice tidak mewariskan referensi 'first' melewati
+      section tanpa titlePg. Batasan yang tersisa: BAB tengah
+      halaman tetap kanan; nilai nomor BAB I tengah halaman tetap
+      Romawi (bukan Arab 1); dokumen yang halaman depannya satu
+      section dengan isi (Gunak) halaman depannya Arab kanan dan
+      nilai isi bergeser sejumlah halaman depan di section itu.
+  16. Halaman pertama BAB I tampil "1" Arab (v0.6.11): sectPr
+      continuous di judul BAB I dipindah ke paragraf sebelumnya,
+      supaya section Arab (decimal start=1) mulai TEPAT di judul
+      BAB I dan halaman pertamanya mendapat titlePg + footer
+      tengah "1" — bukan "viii"/"xii" Romawi lagi. Pemindahan saja
+      merusak rendering di LibreOffice, jadi tiga pendamping:
+      (a) run break halaman/kolom di paragraf sebelumnya dibuang
+      dan diganti pageBreakBefore di judul BAB I (sectPr + break
+      run dalam satu paragraf = dua break: halaman kosong + BAB I
+      geser); (b) w:cols di sectPr penutup section Arab baru
+      dihapus (bila num=2, judul BAB I terbelah huruf per huruf
+      ke dua kolom karena w:ind right-nya melebihi lebar kolom;
+      mengubah num jadi 1 tidak mempan, menghapus elemennya yang
+      mempan); (c) run break halaman (w:br type=page) disisipkan
+      di awal paragraf isi pertama sesudah sectPr penutup itu,
+      karena LibreOffice menggabung section break nextPage
+      penutup itu dengan perubahan format Romawi->Arab di batas
+      pindahan sehingga body naik ke halaman BAB I (total halaman
+      berkurang 1) — break level-run tidak digabung, pagination
+      baseline pulih. Tipe sectPr penutup dibiarkan nextPage
+      supaya restart start=1 tetap jalan (continuous membuat
+      footer BAB I tampil "8"). Tidak ada section break baru dan
+      BAB I tidak dipaksa ke halaman baru. Batasan: BAB tengah
+      halaman tetap kanan; Gunak (halaman depan satu section
+      dengan isi) BAB I-nya tetap Romawi bila tidak bisa
+      diperbaiki tanpa merusak pagination — dilaporkan apa adanya.
 
 Format daftar isi (contoh dosen): titik-titik sampai kanan, nomor
 halaman rata kanan; yang tebal hanya halaman depan + judul BAB.
@@ -1192,14 +1252,42 @@ def _bab_starts_new_page(doc, bab_para, bab_j):
     return False
 
 
+def _strip_break_runs(para):
+    """Hapus run break halaman/kolom (w:br type page/column) dari
+    paragraf — dipakai saat section break nextPage sudah menjamin
+    ganti halaman (dua break = satu halaman kosong). Kembalikan
+    True bila ada break yang dihapus."""
+    removed = False
+    for r in list(para._p.findall(qn("w:r"))):
+        br = r.find(qn("w:br"))
+        if br is not None and br.get(qn("w:type")) in ("page", "column"):
+            r.remove(br)
+            removed = True
+    return removed
+
+
 def _move_break_before(doc, bab_para, bab_j, body_sectPr):
-    """Pindahkan batas section ke paragraf SEBELUM BAB I dengan tipe
-    nextPage, supaya halaman BAB I sendiri sudah masuk section Arab.
-    sectPr lama di BAB I (bila ada) dipakai ulang agar layout
-    halaman depan tidak berubah."""
+    """Pindahkan batas section ke paragraf SEBELUM BAB dengan tipe
+    nextPage, supaya halaman BAB sendiri sudah masuk section Arab.
+    sectPr lama di BAB (bila ada) dipakai ulang agar layout halaman
+    depan tidak berubah.
+    CATATAN v0.6.10: fungsi ini TIDAK dipakai lagi — nextPage
+    sebelum BAB terbukti merusak pagination di LibreOffice untuk
+    dokumen ini (lihat docstring add_footer_page_numbers).
+    Disimpan untuk pemakaian mendatang bila diperlukan.
+    Break ditaruh di paragraf BERISI terakhir sebelum BAB (paragraf
+    kosong di antara dilewati — paragraf kosong itu duduk di atas
+    halaman BAB dan break di sana justru menggeser BAB ke halaman
+    berikut). Run break halaman/kolom di paragraf target dan di
+    paragraf kosong yang dilewati, serta pageBreakBefore di BAB,
+    dibuang karena sudah digantikan section break nextPage (dua
+    break = satu halaman kosong)."""
     if bab_j <= 0:
         return False
-    prev = doc.paragraphs[bab_j - 1]
+    target_j = bab_j - 1
+    while target_j > 0 and not doc.paragraphs[target_j].text.strip():
+        target_j -= 1
+    target = doc.paragraphs[target_j]
     pPr = bab_para._p.find(qn("w:pPr"))
     old = pPr.find(qn("w:sectPr")) if pPr is not None else None
     if old is not None:
@@ -1212,11 +1300,17 @@ def _move_break_before(doc, bab_para, bab_j, body_sectPr):
         t = OxmlElement("w:type")
         sectPr.insert(0, t)
     t.set(qn("w:val"), "nextPage")
-    prev_pPr = prev._p.get_or_add_pPr()
-    existing = prev_pPr.find(qn("w:sectPr"))
+    target_pPr = target._p.get_or_add_pPr()
+    existing = target_pPr.find(qn("w:sectPr"))
     if existing is not None:
-        prev_pPr.remove(existing)
-    prev_pPr.append(sectPr)
+        target_pPr.remove(existing)
+    target_pPr.append(sectPr)
+    for j in range(target_j, bab_j):
+        _strip_break_runs(doc.paragraphs[j])
+    if pPr is not None:
+        pb = pPr.find(qn("w:pageBreakBefore"))
+        if pb is not None:
+            pPr.remove(pb)
     return True
 
 
@@ -1228,6 +1322,101 @@ def _para_has_page_field(p):
                 or r.find(qn("w:instrText")) is not None):
             return True
     return False
+
+
+def _strip_leading_number(line):
+    """Buang awalan penomoran ('1.1 ', 'A. ', 'IV. ') dari baris
+    judul — nomor list di PDF tidak selalu sama dengan teks entri
+    (nomor list dirender LibreOffice, display entri beda lagi)."""
+    return re.sub(r"^(?:\d+(?:\.\d+)*\.?|[A-Za-z]\.|[IVXLCDM]+\.)\s+",
+                  "", line)
+
+
+def _bab_start_page(lines, entry):
+    """Halaman (1-based) judul BAB di PDF hasil: kemunculan TERAKHIR
+    baris yang persis sama dengan teks entri; bila tidak ketemu
+    (judul BAB telanjang / terpotong baris di PDF), cari baris
+    'BAB <romawi>' telanjang (nomor romawi diambil dari teks entri,
+    bukan dari field search — field itu hanya berisi ('text', ...))."""
+    p = _heading_page_out(lines, entry)
+    if p is not None:
+        return p
+    m = RE_BAB.match(entry["text"])
+    if m:
+        return _heading_page_out(lines, {"text": "BAB " + m.group(1)})
+    return None
+
+
+def _bab_starts_new_page_pdf(lines, page, pending_texts=()):
+    """True bila judul BAB adalah baris isi pertama halamannya.
+    Baris judul bagian pending (v0.6.6) yang ditempel sebelum BAB
+    ditoleransi — baris itu bagian dari BAB yang sama, bukan isi bab
+    sebelumnya. pending_texts: teks-teks judul pending itu (tanpa
+    nomor — nomor list di PDF dibuang sebelum dicocokkan)."""
+    if page is None or page < 1 or page > len(lines):
+        return False
+    first_lines = [ln for ln in lines[page - 1] if ln.strip()]
+    pend = {_nospace(t) for t in pending_texts}
+    for k, ln in enumerate(first_lines[:3]):
+        first = norm(ln)
+        if (RE_BAB.match(first) and "..." not in first
+                and not re.search(r"\d\s*$", first)):
+            preceding = first_lines[:k]
+            return all(_nospace(_strip_leading_number(x)) in pend
+                       for x in preceding)
+    return False
+
+
+def _find_bab_paras(doc, entries):
+    """Cari paragraf judul tiap BAB di dokumen, sesuai urutan entri.
+    Cocok dengan teks entri (case-insensitive) ATAU judul BAB
+    telanjang ('BAB I') bila judulnya di baris berikut — keduanya
+    dicocokkan per nomor romawi agar tidak salah bab.
+    Kembalikan list (entry, paragraph, index) yang ketemu saja."""
+    paras = doc.paragraphs
+    out = []
+    start = 0
+    for e in [x for x in entries if x.get("kind") == "bab"]:
+        target = _nospace(e["text"])
+        m = RE_BAB.match(e["text"])
+        roman = m.group(1).lower() if m else None
+        for j in range(start, len(paras)):
+            t = _nospace(paras[j].text)
+            if not t:
+                continue
+            if t == target:
+                out.append((e, paras[j], j))
+                start = j + 1
+                break
+            if roman and t == "bab" + roman:
+                out.append((e, paras[j], j))
+                start = j + 1
+                break
+    return out
+
+
+def _ensure_bab_first_page_footer(section):
+    """Aktifkan different-first-page pada section dan isi first-page
+    footer-nya dengan field PAGE rata tengah (nomor halaman awal BAB
+    di bawah tengah). Section mendapat referensi 'first' SENDIRI
+    (bukan tautan ke section sebelumnya): LibreOffice tidak
+    mewariskan referensi 'first' melewati section tanpa titlePg,
+    jadi bila dibiarkan tertaut, nomor halaman pertama BAB tetap
+    memakai footer default (kanan)."""
+    section.different_first_page_header_footer = True
+    try:
+        fp = section.first_page_footer
+        if fp.part is not None and fp.part is section.footer.part:
+            for ref in list(section._sectPr.findall(qn("w:footerReference"))):
+                if ref.get(qn("w:type")) == "first":
+                    section._sectPr.remove(ref)
+            fp = section.first_page_footer
+        if fp.is_linked_to_previous:
+            fp.is_linked_to_previous = False
+            fp = section.first_page_footer
+        _ensure_footer_number_on(fp, WD_ALIGN_PARAGRAPH.CENTER)
+    except Exception:
+        pass
 
 
 def _footer_has_page_field(footer):
@@ -1340,68 +1529,239 @@ def _ensure_section_footers(section, align, is_first, even_odd):
             pass
 
 
-def add_footer_page_numbers(out_path, entries, bab_new_page=None):
+def add_footer_page_numbers(out_path, entries, bab_new_page=None,
+                            bab_new_pages=None):
     """Tambahkan nomor halaman di footer dokumen hasil.
     bab_new_page: True bila BAB I mulai di halaman baru (diisi dari
-    PDF sumber oleh process(); bila None, ditebak dari sinyal .docx).
-    Bila BAB I mulai di halaman baru, batas section (nextPage)
-    ditaruh di paragraf SEBELUM BAB I supaya halaman BAB I sendiri
-    sudah masuk section Arab — LibreOffice mengabaikan perubahan
-    format nomor pada section break continuous.
+    PDF hasil oleh process(); bila None, ditebak dari sinyal .docx).
+    bab_new_pages: list bool sejajar entri BAB — True bila BAB itu
+    mulai di halaman baru (diisi dari PDF hasil oleh process()).
+    Halaman pertama tiap BAB memakai footer first-page (titlePg)
+    dengan field PAGE rata tengah di bawah; halaman lain tetap
+    Romawi tengah (halaman depan) atau Arab kanan (isi).
+    PENTING (v0.6.10): TIDAK ada section break baru dan TIDAK ada
+    perubahan tipe break. Section break nextPage sebelum BAB
+    terbukti merusak pagination di LibreOffice untuk dokumen ini
+    (memecah daftar isi, halaman kosong, judul terbelah dua kolom)
+    karena sectPr sumber tanpa w:type dan run break kolom. Sebagai
+    gantinya, titlePg hanya dipasang pada section YANG SUDAH ADA
+    yang paragraf berisi pertamanya ADALAH judul BAB yang mulai di
+    halaman baru — section itu halaman pertamanya memang halaman
+    BAB, jadi nomornya jadi di tengah tanpa mengubah pagination
+    sama sekali. BAB I (v0.6.11): sectPr continuous di judulnya
+    dipindah ke paragraf sebelumnya supaya section Arab mulai
+    tepat di judul BAB I (footer tengah "1", bukan "viii"), plus
+    hapus w:cols di sectPr penutup section itu dan run break
+    halaman di awal paragraf isi pertama sesudahnya (lihat kode).
+    BAB yang bukan paragraf pertama section-nya (BAB yang mulai
+    di tengah halaman) dibiarkan seperti semula: BAB tengah
+    halaman tetap kanan. DAFTAR PUSTAKA / lampiran bukan BAB:
+    tidak diberi titlePg.
     Kembalikan True bila batas BAB I ditemukan (Romawi -> Arab)."""
     doc = Document(out_path)
-    bab_texts = [e["text"] for e in entries if e.get("kind") == "bab"]
-    bab_para = None
-    bab_j = None
-    if bab_texts:
-        # coba tiap entri BAB sampai ada yang cocok persis dengan
-        # paragraf heading (baris daftar isi mengandung tab+nomor
-        # sehingga tidak cocok persis — itu yang diinginkan).
-        for bt in bab_texts:
-            target = norm(bt)
-            for j, p in enumerate(doc.paragraphs):
-                if norm(p.text) == target:
-                    bab_para = p
-                    bab_j = j
-                    break
-            if bab_para is not None:
-                break
-    if bab_para is None:
+    # Cari paragraf judul tiap BAB (kenal judul telanjang "BAB I" yang
+    # judulnya di baris berikut; baris daftar isi mengandung tab+nomor
+    # sehingga tidak cocok persis — itu yang diinginkan).
+    bab_paras = _find_bab_paras(doc, entries)
+    if not bab_paras:
         for s in doc.sections:
             _ensure_section_footers(s, WD_ALIGN_PARAGRAPH.CENTER, False,
                                     False)
         doc.save(out_path)
         return False
 
+    bab_para, bab_j = bab_paras[0][1], bab_paras[0][2]
     body = doc.element.body
     body_sectPr = body.find(qn("w:sectPr"))
+
+    # BAB I: sectPr continuous di paragrafnya SENDIRI, tapi HANYA
+    # bila section tempat BAB I berada TIDAK mengandung judul
+    # halaman depan (KATA PENGANTAR, HALAMAN PERSETUJUAN, dsb.)
+    # sebelum BAB I. sectPr itu menutup section yang berakhir di
+    # BAB I; bila section itu memuat halaman depan (Gunak: section
+    # besar dari akhir cover sampai jauh ke isi), sectPr continuous
+    # mengubah tipe break-nya dari nextPage menjadi continuous
+    # sehingga halaman depan tidak lagi mulai di halaman baru (isi
+    # hal. 1-16 bergeser). Bila section BAB I hanya memuat daftar
+    # isi + BAB I (nifas, Gusti), sectPr continuous justru
+    # DIPERLUKAN: tanpa itu LibreOffice memecah/menggeser daftar
+    # isi (judul sendiri di satu halaman, entri di halaman berikut).
     if bab_new_page is None:
         bab_new_page = _bab_starts_new_page(doc, bab_para, bab_j)
-    if bab_new_page:
-        _move_break_before(doc, bab_para, bab_j, body_sectPr)
-    else:
-        # BAB I di tengah halaman: pakai continuous di paragraf BAB I
-        # (benar di Word; LibreOffice mengabaikan perubahan format
-        # Romawi pada kasus ini).
+    _front_markers = ("KATA PENGANTAR", "HALAMAN PERSETUJUAN",
+                      "LEMBAR PENGESAHAN", "LEMBAR PERSETUJUAN",
+                      "HALAMAN JUDUL", "ABSTRAK", "KATA SAMBUTAN",
+                      "PERNYATAAN", "HALAMAN PERNYATAAN")
+    _sec_start = 0
+    for _i in range(bab_j - 1, -1, -1):
+        _pPr = doc.paragraphs[_i]._p.find(qn("w:pPr"))
+        if _pPr is not None and _pPr.find(qn("w:sectPr")) is not None:
+            _sec_start = _i + 1
+            break
+    _has_front = any(
+        norm(doc.paragraphs[_i].text) in _front_markers
+        for _i in range(_sec_start, bab_j))
+    if not _has_front:
         pPr = bab_para._p.get_or_add_pPr()
         if pPr.find(qn("w:sectPr")) is None:
             pPr.append(_new_sectPr_from(body_sectPr))
 
-    # --- petakan ulang: section tempat paragraf BAB I berada ---
+    # --- v0.6.11: pindahkan sectPr dari paragraf BAB I ke paragraf
+    # SEBELUMNYA, supaya section Arab mulai TEPAT di judul BAB I.
+    # Sebelumnya batas section ada di judul BAB I sendiri: halaman
+    # pertama BAB I masih masuk section depan (Romawi) sehingga
+    # nomornya tampil "viii"/"xii" tengah, bukan "1". Dengan batas
+    # dipindah satu paragraf lebih awal, judul BAB I jadi paragraf
+    # pertama section Arab (decimal start=1) dan mendapat titlePg
+    # + footer tengah "1" — tanpa mengubah pagination, karena tipe
+    # break dipertahankan. Hanya sectPr continuous yang dipindah:
+    # sectPr nextPage/oddPage/evenPage — atau tanpa w:type (default
+    # = nextPage) — TIDAK dipindah, karena memindah break halaman
+    # akan menggeser BAB I ke halaman baru. Bila paragraf
+    # sebelumnya sudah punya sectPr sendiri, atau BAB I paragraf
+    # pertama dokumen, atau section BAB I memuat judul halaman
+    # depan (Gunak), tidak dipindah. Langkah ini HARUS sebelum
+    # pemetaan section di bawah, supaya bab_idx/body_idx dan
+    # sec_first_text sudah memakai batas yang baru.
+    # PERINGATAN (ditemukan saat uji): paragraf sebelumnya kadang
+    # membawa run break halaman/kolom (nifas: w:br type=column di
+    # paragraf kosong sesudah daftar isi). sectPr + break run
+    # dalam SATU paragraf membuat LibreOffice menghitung dua
+    # break (halaman kosong + BAB I geser satu halaman). Karena
+    # itu break run itu dibuang dan diganti pageBreakBefore di
+    # judul BAB I: BAB I tetap mulai di halaman baru, tanpa break
+    # ganda.
+    # PENTING v0.6.11: pemindahan hanya aman bila BAB I SUDAH mulai
+    # di halaman baru (bab_new_page True). Bila BAB I mulai di
+    # tengah halaman (Gusti: judulnya di bawah halaman DAFTAR
+    # GAMBAR), perubahan format Romawi->Arab di batas pindahan
+    # MEMAKSA halaman baru — judul BAB I loncat ke halaman
+    # berikut dan total halaman bertambah 1 (Gusti 142 -> 143).
+    # BAB tengah halaman dibiarkan seperti v0.6.10 (footer tetap
+    # Romawi tengah dari section depan); memaksanya jadi "1"
+    # butuh halaman baru, dan itu mengubah pagination.
+    _moved = False
+    if not _has_front and bab_j > 0 and bab_new_page:
+        _bpPr = bab_para._p.find(qn("w:pPr"))
+        _bsp = (_bpPr.find(qn("w:sectPr"))
+                if _bpPr is not None else None)
+        if _bsp is not None:
+            _bt = _bsp.find(qn("w:type"))
+            _bval = _bt.get(qn("w:val")) if _bt is not None else None
+            if _bval == "continuous":
+                _prev = doc.paragraphs[bab_j - 1]
+                _ppPr = _prev._p.get_or_add_pPr()
+                if _ppPr.find(qn("w:sectPr")) is None:
+                    if _strip_break_runs(_prev):
+                        bab_para.paragraph_format.page_break_before = True
+                    _bpPr.remove(_bsp)
+                    _ppPr.append(_bsp)
+                    _moved = True
+
+    # --- v0.6.11 (lanjutan): dua perbaikan yang membuat pemindahan
+    # sectPr di atas tidak merusak rendering di LibreOffice.
+    # (a) sectPr yang menutup section Arab baru BAB I (paragraf
+    # pertama ber-sectPr sesudah judul BAB I) sering membawa
+    # w:cols num=2 dari sumber (section isi sumber 2 kolom). Judul
+    # BAB I yang kini duduk di section itu ikut ter-layout 2 kolom
+    # — indent kanannya (w:ind right) melebihi lebar kolom
+    # sehingga judul terbelah huruf per huruf ke dua kolom
+    # (nifas: "B"/"A" kolom kiri, "B I"/"PENDAHULUAN" kolom
+    # kanan). Hapus elemen w:cols-nya: section ini hanya berisi
+    # judul BAB I + paragraf kosong, jadi 1 kolom sudah benar;
+    # isi (section berikut) tidak tersentuh. Mengubah num=2
+    # menjadi num=1 TIDAK cukup (LibreOffice mengabaikannya bila
+    # equalWidth=0 tanpa w:col); menghapus elemennya yang
+    # berhasil (eksperimen F3).
+    # (b) Setelah batas dipindah, LibreOffice mengabaikan section
+    # break nextPage di sectPr penutup itu: body ikut naik ke
+    # halaman BAB I dan total halaman berkurang 1 (nifas 32 -> 31).
+    # Penyebabnya: dua section break berurutan (perubahan format
+    # Romawi->Arab di batas pindahan + nextPage penutup) digabung
+    # LibreOffice menjadi satu break (dibuktikan: G1 — ubah
+    # nextPage penutup jadi continuous di baseline saja sudah
+    # menggeser body ke halaman BAB I). Gantinya, sisipkan run
+    # break halaman (w:br type=page) di awal paragraf isi pertama
+    # sesudah sectPr penutup: break level-run tidak digabung
+    # dengan section break, jadi body kembali mulai di halaman
+    # baru (pagination baseline pulih, nifas 32 halaman). Tipe
+    # sectPr penutup DIBIARKAN nextPage supaya restart pgNumType
+    # start=1 tetap jalan — mengubahnya jadi continuous membuat
+    # footer BAB I tampil "8", bukan "1" (eksperimen I1 vs I2).
+    # Run break ini BUKAN section break nextPage baru dan TIDAK
+    # memaksa BAB I ke halaman baru (BAB I sudah di halamannya
+    # sendiri); ia hanya mengembalikan pemisah halaman body yang
+    # hilang akibat pemindahan batas.
+    if _moved:
+        _close_j = None
+        for _j in range(bab_j, len(doc.paragraphs)):
+            _p = doc.paragraphs[_j]._p.find(qn("w:pPr"))
+            if _p is not None and _p.find(qn("w:sectPr")) is not None:
+                _close_j = _j
+                break
+        if _close_j is not None:
+            _cpPr = doc.paragraphs[_close_j]._p.find(qn("w:pPr"))
+            _csp = _cpPr.find(qn("w:sectPr"))
+            _cols = _csp.find(qn("w:cols"))
+            if _cols is not None:
+                _csp.remove(_cols)
+            if _close_j + 1 < len(doc.paragraphs):
+                _nxt = doc.paragraphs[_close_j + 1]
+                _r = OxmlElement("w:r")
+                _br = OxmlElement("w:br")
+                _br.set(qn("w:type"), "page")
+                _r.append(_br)
+                _nxt._p.insert(0, _r)
+
+    # --- BAB II+: TIDAK ada break baru (lihat docstring). Yang
+    # dibutuhkan hanya peta "BAB ini mulai di halaman baru?" untuk
+    # menentukan section mana yang diberi titlePg di bawah. ---
+    bab_entries = [e for e in entries if e.get("kind") == "bab"]
+    starts_by_entry = {}
+    if bab_new_pages is not None:
+        for e, starts in zip(bab_entries, bab_new_pages):
+            starts_by_entry[id(e)] = bool(starts)
+    bab_new_by_id = {id(bab_para._p): bool(bab_new_page)}
+    for entry, para, j in bab_paras[1:]:
+        starts = starts_by_entry.get(id(entry))
+        if starts is None:
+            starts = _bab_starts_new_page(doc, para, j)
+        bab_new_by_id[id(para._p)] = bool(starts)
+
+    # --- petakan ulang: section tempat paragraf BAB I berada, dan
+    # paragraf pertama tiap section (untuk footer tengah halaman BAB).
+    # sec_first_text = paragraf BERISI pertama tiap section (paragraf
+    # kosong di atas judul BAB dilewati — judul BAB-lah yang
+    # menentukan halaman pertama section itu). ---
     idx = 0
     bab_idx = None
     bab_has_break = False
+    sec_first = [None]
+    sec_first_text = [None]
     for child in body.iterchildren():
+        if child.tag != qn("w:p"):
+            continue
+        if sec_first[idx] is None:
+            sec_first[idx] = child
+        if sec_first_text[idx] is None:
+            txt = "".join(n.text or ""
+                          for n in child.findall(".//" + qn("w:t")))
+            if txt.strip():
+                sec_first_text[idx] = child
         if child is bab_para._p:
             bab_idx = idx
             pPr = child.find(qn("w:pPr"))
             bab_has_break = (pPr is not None
                              and pPr.find(qn("w:sectPr")) is not None)
-            break
-        if child.tag == qn("w:p"):
-            pPr = child.find(qn("w:pPr"))
-            if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
-                idx += 1
+        pPr = child.find(qn("w:pPr"))
+        if pPr is not None and pPr.find(qn("w:sectPr")) is not None:
+            idx += 1
+            sec_first.append(None)
+            sec_first_text.append(None)
+    while sec_first and sec_first[-1] is None:
+        sec_first.pop()
+    while sec_first_text and sec_first_text[-1] is None:
+        sec_first_text.pop()
     if bab_idx is None:
         bab_idx = len(doc.sections) - 1
     # Bila break ada di paragraf BAB I sendiri, BAB I masih di section
@@ -1426,6 +1786,12 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None):
         align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
                  else WD_ALIGN_PARAGRAPH.RIGHT)
         _ensure_section_footers(s, align, i == 0, even_odd)
+    # --- cover dulu, SEBELUM footer tengah BAB ---
+    # (v0.6.10) Urutan penting: first-page footer cover harus
+    # dikosongkan SEBELUM _ensure_bab_first_page_footer membuat
+    # part footer 'first' baru untuk section BAB. Bila cover
+    # dikosongkan sesudahnya, LibreOffice menampilkan '1' di cover
+    # (footer 'first' section BAB dipakai untuk halaman 1).
     s0 = doc.sections[0]
     if not any(p.text.strip() for p in s0.header.paragraphs):
         s0.different_first_page_header_footer = True
@@ -1433,20 +1799,55 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None):
     # pastikan first-page footer-nya ADA dan kosong. Bila dokumen
     # tidak punya referensi first footer, LibreOffice jatuh kembali
     # ke footer default sehingga nomor ikut tampil di cover.
-    try:
-        fp = s0.first_page_footer
-        if fp.part is not None and fp.part is s0.footer.part:
-            # first & default berbagi part yang sama: pisahkan dulu
-            for ref in list(s0._sectPr.findall(qn("w:footerReference"))):
-                if ref.get(qn("w:type")) == "first":
-                    s0._sectPr.remove(ref)
+    # (Bila section 0 sekaligus section BAB I — dokumen tanpa halaman
+    # depan — cover tidak ada, jadi jangan dikosongkan: BAB I di
+    # halaman 1 tetap menampilkan nomornya di tengah.)
+    if body_idx != 0:
+        try:
             fp = s0.first_page_footer
-        if fp.is_linked_to_previous:
-            fp.is_linked_to_previous = False
-        for p in list(fp.paragraphs):
-            _strip_page_field(p)
-    except Exception:
-        pass
+            if fp.part is not None and fp.part is s0.footer.part:
+                # first & default berbagi part yang sama: pisahkan dulu
+                for ref in list(s0._sectPr.findall(qn("w:footerReference"))):
+                    if ref.get(qn("w:type")) == "first":
+                        s0._sectPr.remove(ref)
+                fp = s0.first_page_footer
+            if fp.is_linked_to_previous:
+                fp.is_linked_to_previous = False
+            for p in list(fp.paragraphs):
+                _strip_page_field(p)
+        except Exception:
+            pass
+    # --- footer tengah untuk halaman pertama BAB ---
+    # Section yang paragraf berisi pertamanya adalah judul BAB yang
+    # mulai di halaman baru mendapat first-page footer dengan nomor
+    # di tengah bawah. Section BAB yang mulai di tengah halaman
+    # TIDAK diberi titlePg: halaman pertamanya di LibreOffice
+    # adalah halaman BERIKUT (halaman yang pertama kali dimulai
+    # paragraf section itu), dan nomornya akan salah tengah. BAB I
+    # tidak masuk di sini: ia paragraf terakhir section depan,
+    # halamannya sudah tengah (Romawi) lewat footer default.
+    centered = set()
+    for i, fp in enumerate(sec_first_text):
+        if (i >= body_idx and fp is not None
+                and bab_new_by_id.get(id(fp), False)):
+            centered.add(i)
+    for i in sorted(centered):
+        if i < len(doc.sections):
+            _ensure_bab_first_page_footer(doc.sections[i])
+    # Hapus titlePg LIAR dari section lain (kecuali cover sec 0):
+    # titlePg warisan sumber pada section yang paragraf pertamanya
+    # BUKAN BAB yang mulai di halaman baru akan menengahkan halaman
+    # pertama section itu — halaman yang salah (Gunak: sec 3 punya
+    # titlePg warisan, paragraf pertamanya "Penjelasan Bagan :",
+    # sehingga hal. 31 jadi tengah padahal BAB III di hal. 32).
+    # Tanpa titlePg, section itu memakai footer default (kanan).
+    for i, s in enumerate(doc.sections):
+        if i == 0 or i in centered:
+            continue
+        _sp = s._sectPr
+        _tp = _sp.find(qn("w:titlePg"))
+        if _tp is not None:
+            _sp.remove(_tp)
     doc.save(out_path)
     return True
 
@@ -1602,28 +2003,40 @@ def process(docx_path, work_dir, include_lists=True):
 
     # --- nomor halaman footer (v0.6.0): field PAGE dinamis, jadi
     # tidak mengubah pagination dan tidak perlu verifikasi ulang.
-    # BAB I mulai di halaman baru? Dicek dari PDF HASIL (bukan PDF
-    # sumber — penyisipan daftar isi bisa menggeser posisi BAB I
-    # dalam halaman): cari halaman heading BAB I, lalu lihat apakah
-    # judulnya baris pertama halaman itu.
+    # Tiap BAB mulai di halaman baru? Dicek dari PDF HASIL (bukan PDF
+    # sumber — penyisipan daftar isi bisa menggeser posisi BAB dalam
+    # halaman): cari halaman judul BAB (kenal judul telanjang), lalu
+    # lihat apakah judulnya baris pertama halaman itu. Judul bagian
+    # pending (v0.6.6) yang ditempel sebelum BAB I ditoleransi sebagai
+    # baris sebelum judul BAB I. Hasilnya dipakai add_footer_page_
+    # numbers: BAB yang mulai di halaman baru dapat nextPage break +
+    # first-page footer tengah; yang mulai di tengah halaman tidak.
     bab_new_page = False
+    bab_new_pages = []
     bab_entries = [e for e in entries if e.get("kind") == "bab"]
     if bab_entries:
         try:
             lines_out = pdf_pages_lines(pdf_out)
-            bab_out = _heading_page_out(lines_out, bab_entries[0])
-            if bab_out is not None:
-                first_lines = [ln for ln in lines_out[bab_out - 1]
-                               if ln.strip()]
-                if first_lines:
-                    first = norm(first_lines[0])
-                    bab_new_page = bool(
-                        RE_BAB.match(first) and "..." not in first
-                        and not re.search(r"\d\s*$", first))
+            # posisi tiap entri BAB di entries, untuk mencari judul
+            # pending-nya (sub break_before tepat setelah BAB itu)
+            bab_pos = [i for i, e in enumerate(entries)
+                       if e.get("kind") == "bab"]
+            for bi, be in enumerate(bab_entries):
+                pg = _bab_start_page(lines_out, be)
+                pend = []
+                for e in entries[bab_pos[bi] + 1:]:
+                    if e.get("kind") == "bab":
+                        break
+                    if e.get("break_before"):
+                        pend.append(e["text"])
+                bab_new_pages.append(
+                    _bab_starts_new_page_pdf(lines_out, pg, pend))
         except Exception:
-            bab_new_page = False
+            bab_new_pages = [False] * len(bab_entries)
+        bab_new_page = bab_new_pages[0] if bab_new_pages else False
     footer_ok = add_footer_page_numbers(out_docx, entries,
-                                        bab_new_page=bab_new_page)
+                                        bab_new_page=bab_new_page,
+                                        bab_new_pages=bab_new_pages)
 
     return {
         "entries": entries,
@@ -1636,6 +2049,7 @@ def process(docx_path, work_dir, include_lists=True):
         "shift": total_out - total_in,
         "corrected": False,
         "footer_ok": footer_ok,
+        "bab_new_pages": bab_new_pages,
         "mismatches": mismatches,
         "mismatches_gambar": mismatches_gambar,
         "mismatches_tabel": mismatches_tabel,
