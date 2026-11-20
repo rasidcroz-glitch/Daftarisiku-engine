@@ -99,7 +99,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.20"  # v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
+VERSION = "0.6.21"  # v0.6.21: tombol "Laporkan hasil salah" — POST /api/report/<job> (satu laporan per job, TIDAK membuka download; disimpan {job}.report.json, ikut kedaluwarsa 24 jam) + GET /api/reports (daftar laporan untuk pemilik/Muse). Website: tombol ghost di layar pratinjau + prompt deskripsi opsional + status konfirmasi. v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
@@ -750,6 +750,63 @@ def status(job):
     # website memakai pratinjau tersimpan di localStorage.
     resp.update(state.get("result") or {})
     return jsonify(resp)
+
+
+@app.post("/api/report/<job>")
+def report(job):
+    """Laporkan hasil salah (v0.6.21): pelanggan di pratinjau menandai
+    hasil bermasalah supaya pemilik bisa memperbaiki mesin. Laporan
+    TIDAK membuka download (bayar tetap Rp15.000), satu laporan per job.
+    Disimpan sebagai {job}.report.json di RESULTS_DIR (ikut kedaluwarsa
+    24 jam seperti hasil; Muse mengecek berkala lewat /api/reports)."""
+    if not job.isalnum() or len(job) > 32:
+        return jsonify({"error": "job tidak valid"}), 400
+    if (not os.path.exists(os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx"))
+            and not os.path.exists(_job_state_path(job))):
+        return jsonify({"error": "job tidak ditemukan"}), 404
+    rep_path = os.path.join(RESULTS_DIR, f"{job}.report.json")
+    if os.path.exists(rep_path):
+        return jsonify({"error": "laporan sudah dikirim untuk dokumen ini",
+                        "reported": True}), 409
+    try:
+        data = request.get_json(silent=True) or {}
+    except Exception:
+        data = {}
+    msg = (data.get("message") or "")
+    if not isinstance(msg, str):
+        msg = ""
+    msg = msg.strip()[:500]
+    try:
+        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json")) as mf:
+            filename = (json.load(mf) or {}).get("filename") or ""
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        filename = ""
+    rec = {"job": job, "filename": filename, "message": msg,
+           "created_at": int(time.time())}
+    try:
+        with open(rep_path, "w") as f:
+            json.dump(rec, f)
+    except OSError as exc:
+        return jsonify({"error": f"gagal menyimpan laporan: {exc}"}), 500
+    return jsonify({"reported": True, "job": job})
+
+
+@app.get("/api/reports")
+def list_reports():
+    """Daftar laporan hasil salah (untuk pemilik/Muse mengecek)."""
+    out = []
+    try:
+        for name in sorted(os.listdir(RESULTS_DIR)):
+            if not name.endswith(".report.json"):
+                continue
+            try:
+                with open(os.path.join(RESULTS_DIR, name)) as f:
+                    out.append(json.load(f))
+            except (OSError, json.JSONDecodeError):
+                continue
+    except OSError:
+        pass
+    return jsonify({"reports": out})
 
 
 @app.get("/api/download/<job>")
