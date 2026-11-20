@@ -207,8 +207,10 @@ RE_NUMBER = re.compile(r"^(\d+)\.\s+\S")
 RE_LOWER = re.compile(r"^([a-z])\.\s+\S")
 # Caption gambar/tabel pola standar: "Gambar 1.1 Peta Lokasi",
 # "Tabel 2.1 Data Responden", nomor tunggal "Gambar 1 Denah", dan
-# salah ketik pemisah spasi "Gambar 2 1 Kerangka Berpikir" (v0.4.0).
-RE_CAPTION = re.compile(r"^(Gambar|Tabel)\s+(\d+(?:[.\s]\d+)*)\s+\S",
+# salah ketik pemisah spasi "Gambar 2 1 Kerangka Berpikir" (v0.4.0)
+# serta titik+spasi "Gambar 2. 1 Arsitektur LSTM" (v0.6.18: pemisah
+# antar angka kini [.\s]+, bukan satu karakter).
+RE_CAPTION = re.compile(r"^(Gambar|Tabel)\s+(\d+(?:[.\s]+\d+)*)\s+\S",
                          re.IGNORECASE)
 RE_LAMPIRAN = re.compile(r"^LAMPIRAN\s+\d+\b", re.IGNORECASE)
 # Baris daftar isi LAMA (v0.6.1): "BAB I\t1", "1. Rumusan Masalah\t7",
@@ -949,9 +951,10 @@ def extract_captions(docx_path):
     terhadap BAB I, sama seperti heading isi.
 
     Normalisasi tampilan (v0.4.0): pemisah spasi pada nomor
-    ('Gambar 2 1 ...') ditampilkan sebagai titik ('Gambar 2.1 ...').
-    Isi dokumen TIDAK diubah; 'text' tetap apa adanya (untuk mencari
-    halaman di PDF), 'display' yang ternormalisasi untuk daftar."""
+    ('Gambar 2 1 ...', 'Gambar 2. 1 ...') ditampilkan sebagai titik
+    ('Gambar 2.1 ...'). Isi dokumen TIDAK diubah; 'text' tetap apa
+    adanya (untuk mencari halaman di PDF), 'display' yang
+    ternormalisasi untuk daftar."""
     doc = Document(docx_path)
     gambar, tabel = [], []
     for i, p in enumerate(doc.paragraphs):
@@ -1246,6 +1249,56 @@ def _enable_update_fields(doc):
     settings.append(el)
 
 
+def _pgnum_fmt(sectPr):
+    """Format penomoran (lowerRoman/decimal/...) dari sebuah sectPr,
+    atau None bila tidak ada pgNumType."""
+    if sectPr is None:
+        return None
+    pg = sectPr.find(qn("w:pgNumType"))
+    if pg is None:
+        return None
+    return pg.get(qn("w:fmt"))
+
+
+def _relax_list_heading_break(heading_para, doc):
+    """v0.6.19: bila heading daftar (DAFTAR ISI/GAMBAR/TABEL) membawa
+    section break nextPage, judul itu terkurung sendirian di satu
+    halaman dan entrinya mulai di halaman berikut (file UJI_COBA_2:
+    dua break nextPage berurutan di judul DAFTAR ISI). Ubah break-nya
+    jadi continuous supaya judul+entri satu halaman — TAPI hanya bila
+    format nomor (pgNumType fmt) section sebelum dan sesudahnya sama,
+    supaya penomoran Romawi/Arab tidak berubah. Bila beda, biarkan
+    (judul tetap pisah, tapi nomor tetap benar)."""
+    pPr = heading_para._p.find(qn("w:pPr"))
+    if pPr is None:
+        return
+    sectPr = pPr.find(qn("w:sectPr"))
+    if sectPr is None:
+        return
+    t = sectPr.find(qn("w:type"))
+    if t is not None and t.get(qn("w:val")) == "continuous":
+        return
+    if t is not None and t.get(qn("w:val")) != "nextPage":
+        return  # oddPage/evenPage: jangan ubah
+    sections = list(doc.sections)
+    idx = None
+    for i, s in enumerate(sections):
+        if s._sectPr is sectPr:
+            idx = i
+            break
+    if idx is None or idx + 1 >= len(sections):
+        return
+    if _pgnum_fmt(sectPr) != _pgnum_fmt(sections[idx + 1]._sectPr):
+        return
+    if t is None:
+        t = OxmlElement("w:type")
+        t.set(qn("w:val"), "continuous")
+        sectPr.insert(0, t)
+    else:
+        t.set(qn("w:val"), "continuous")
+    _normalize_sectPr_order(sectPr)
+
+
 def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
                       normalize_pre_bab=False):
     """Sisipkan daftar isi setelah heading 'DAFTAR ISI' (atau sebelum
@@ -1389,6 +1442,12 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
         br.add_run().add_break(WD_BREAK.PAGE)
         _insert_after(last_toc, br)
         last_toc = br
+    # v0.6.19: judul DAFTAR ISI jangan sampai terkurung sendirian di
+    # satu halaman oleh section break nextPage (lihat
+    # _relax_list_heading_break). Hanya bila heading itu dari dokumen
+    # sumber (toc_para); judul yang baru dibuat tidak membawa sectPr.
+    if toc_para is not None:
+        _relax_list_heading_break(toc_para, doc)
 
     # --- 2. Daftar gambar (setelah daftar isi, atau setelah heading
     # 'DAFTAR GAMBAR' bila dokumen sudah punya) ---
@@ -1403,9 +1462,19 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
             g_anchor = g_head
         # v0.6.5: daftar gambar mulai di lembar baru.
         _page_break_before(g_made[0] if g_head is None else g_head)
+        if g_head is not None:
+            _relax_list_heading_break(g_head, doc)
         for e in gambar:
             g_made.append(add_entry(disp(e), e["page"], 0, False))
         last_anchor = insert_after_seq(g_anchor, g_made)
+    else:
+        # v0.6.18: daftar kosong tapi dokumen punya heading template
+        # ("DAFTAR GAMBAR" tanpa entri) — tetap mulai di lembar baru
+        # supaya tidak menempel di akhir daftar isi.
+        g_head = find_heading("DAFTAR GAMBAR")
+        if g_head is not None:
+            _page_break_before(g_head)
+            _relax_list_heading_break(g_head, doc)
 
     # --- 3. Daftar tabel (setelah daftar gambar, atau setelah heading
     # 'DAFTAR TABEL' bila dokumen sudah punya) ---
@@ -1419,9 +1488,17 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
             t_anchor = t_head
         # v0.6.5: daftar tabel mulai di lembar baru.
         _page_break_before(t_made[0] if t_head is None else t_head)
+        if t_head is not None:
+            _relax_list_heading_break(t_head, doc)
         for e in tabel:
             t_made.append(add_entry(disp(e), e["page"], 0, False))
         insert_after_seq(t_anchor, t_made)
+    else:
+        # v0.6.18: sama seperti daftar gambar di atas.
+        t_head = find_heading("DAFTAR TABEL")
+        if t_head is not None:
+            _page_break_before(t_head)
+            _relax_list_heading_break(t_head, doc)
 
     _enable_update_fields(doc)
     doc.save(out_path)
@@ -1586,6 +1663,66 @@ def _para_has_page_field(p):
                 or r.find(qn("w:instrText")) is not None):
             return True
     return False
+
+
+def _para_el_has_page_field(p_el):
+    """Apakah elemen w:p mentah mengandung field PAGE — mencari di
+    semua run turunannya (bukan hanya anak langsung). Dipakai untuk
+    paragraf di dalam <w:sdt> yang tidak tercakup footer.paragraphs."""
+    if p_el.find(qn("w:fldSimple")) is not None:
+        return True
+    for r in p_el.iter(qn("w:r")):
+        if (r.find(qn("w:fldChar")) is not None
+                or r.find(qn("w:instrText")) is not None):
+            return True
+    return False
+
+
+def _para_el_alignment(p_el):
+    """Nilai w:jc (center/right/left) sebuah elemen w:p mentah."""
+    pPr = p_el.find(qn("w:pPr"))
+    if pPr is None:
+        return None
+    jc = pPr.find(qn("w:jc"))
+    return jc.get(qn("w:val")) if jc is not None else None
+
+
+def _strip_page_field_el(p_el):
+    """Hapus field PAGE dari elemen w:p mentah (biarkan teks lain).
+    Sama seperti _strip_page_field tapi menerima elemen, supaya bisa
+    dipakai untuk paragraf di dalam <w:sdt>. Bila paragraf itu
+    berada di dalam <w:sdt> dan jadi kosong, hapus juga <w:sdt>-nya
+    supaya tidak tersisa paragraf kosong di footer."""
+    for child in list(p_el):
+        if child.tag == qn("w:fldSimple"):
+            p_el.remove(child)
+    in_result = False
+    for r in list(p_el.findall(qn("w:r"))):
+        fc = r.find(qn("w:fldChar"))
+        if r.find(qn("w:instrText")) is not None or fc is not None:
+            if fc is not None:
+                t = fc.get(qn("w:fldCharType"))
+                if t == "separate":
+                    in_result = True
+                elif t == "end":
+                    in_result = False
+            p_el.remove(r)
+        elif in_result:
+            p_el.remove(r)
+    # Bila paragraf ini isi satu-satunya <w:sdt> dan kini kosong,
+    # hapus <w:sdt> sekalian (building block 'Page Numbers' hanya
+    # berisi field itu; paragraf kosong hanya menambah baris kosong).
+    parent = p_el.getparent()
+    if parent is not None and parent.tag == qn("w:sdtContent"):
+        sdt = parent.getparent()
+        if sdt is not None and sdt.tag == qn("w:sdt"):
+            has_text = any(
+                (t.text or "").strip()
+                for t in parent.iter(qn("w:t")))
+            if not has_text:
+                grand = sdt.getparent()
+                if grand is not None:
+                    grand.remove(sdt)
 
 
 def _strip_leading_number(line):
@@ -1755,36 +1892,42 @@ def _ensure_footer_number_on(footer, align):
     punya field PAGE, dibiarkan (kecuali posisinya beda — maka
     tautan diputus dan dibuat ulang). Teks footer lain dipertahankan;
     teks hasil field PAGE lama TIDAK disalin (itu yang menimbulkan
-    angka '1' liar)."""
-    if _footer_has_page_field(footer):
-        for p in footer.paragraphs:
-            if _para_has_page_field(p):
-                if p.alignment == align:
-                    return
-                if footer.is_linked_to_previous:
-                    old_texts = [q.text for q in footer.paragraphs
-                                 if q.text.strip()
-                                 and not _para_has_page_field(q)]
-                    footer.is_linked_to_previous = False
-                    for t in old_texts:
-                        footer.add_paragraph(t)
-                    target = next((q for q in footer.paragraphs
-                                   if not q.text.strip()), None)
-                    if target is None:
-                        target = footer.add_paragraph()
-                    _add_page_field_para(target, align)
-                else:
-                    _strip_page_field(p)
-                    _add_page_field_para(p, align)
-                return
-    old_texts = [p.text for p in footer.paragraphs
-                 if p.text.strip() and not _para_has_page_field(p)]
+    angka '1' liar).
+    v0.6.19: field PAGE sumber sering berada di dalam <w:sdt>
+    (content control 'Page Numbers' Word) yang tidak tercakup
+    footer.paragraphs — dulu terlewat sehingga mesin menambah field
+    kedua (nomor double). Kini semua w:p di xml footer diperiksa;
+    bila ada lebih dari satu field, sisanya dibuang, dan bila
+    posisinya beda, field lama dibuang lalu dibuat satu yang benar."""
+    want = {WD_ALIGN_PARAGRAPH.CENTER: "center",
+            WD_ALIGN_PARAGRAPH.RIGHT: "right",
+            WD_ALIGN_PARAGRAPH.LEFT: "left"}.get(align)
+    # 1. Cari field PAGE di mana pun di xml footer ini (termasuk sdt).
+    field_paras = [el for el in footer._element.iter(qn("w:p"))
+                   if _para_el_has_page_field(el)]
+    if field_paras and _para_el_alignment(field_paras[0]) == want:
+        # Posisi sudah benar — buang field tambahan bila ada, selesai.
+        for extra in field_paras[1:]:
+            _strip_page_field_el(extra)
+        return
+    # 2. Perlu diubah/tambah: bila tertaut ke sebelumnya, putuskan
+    # dulu supaya hanya footer ini yang berubah.
     if footer.is_linked_to_previous:
+        old_texts = [q.text for q in footer.paragraphs
+                     if q.text.strip()
+                     and not _para_has_page_field(q)]
         footer.is_linked_to_previous = False
         for t in old_texts:
             footer.add_paragraph(t)
-    target = next((p for p in footer.paragraphs if not p.text.strip()),
-                  None)
+        # Footer ini kini punya part sendiri; field lama (bila ada)
+        # tertinggal di part sebelumnya — tidak perlu dibuang di sini.
+    else:
+        # Bukan tertaut: buang semua field lama yang ada di footer ini.
+        for el in field_paras:
+            _strip_page_field_el(el)
+    # 3. Tambah tepat satu field PAGE dengan posisi benar.
+    target = next((p for p in footer.paragraphs
+                   if not p.text.strip()), None)
     if target is None:
         target = footer.add_paragraph()
     _add_page_field_para(target, align)
@@ -2460,6 +2603,14 @@ def process(docx_path, work_dir, include_lists=True):
     _clean = Document(docx_path)
     _remove_old_toc_runs(_clean)
     _clean.save(clean_path)
+    # v0.6.19: bebaskan Document sumber SEBELUM render LibreOffice —
+    # objek ini (4 MB, 783 paragraf, 92 tabel) dipertahankan Python
+    # selama process() bila tidak di-del, dan bersama LibreOffice
+    # (±300 MB) total melewati 512 MB container sehingga container
+    # di-restart platform dan job hilang (404 saat polling).
+    del _clean
+    gc.collect()
+    _trim_memory()
     pdf_in = render_pdf(clean_path, work_dir)
     pages_in = pdf_pages_text(pdf_in)
     total_in = len(pages_in)
@@ -2474,6 +2625,11 @@ def process(docx_path, work_dir, include_lists=True):
     if tabel:
         find_pages(pages_in, tabel)
         compute_labels(tabel, bab1=bab1)
+    # v0.6.19: teks PDF masukan (147 halaman) tidak lagi dipakai
+    # setelah label dihitung — bebaskan sebelum render keluaran.
+    del pages_in
+    gc.collect()
+    _trim_memory()
 
     out_docx = os.path.join(work_dir, "hasil-daftar-isi.docx")
     # v0.6.13: normalisasi sub-heading pra-BAB (cacat 1) default MATI;
