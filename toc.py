@@ -1060,7 +1060,7 @@ def _line_matches(ln, pat):
     return bool(s_ln) and s_ln == s_pat
 
 
-def _heading_line_page(lines, keys, start=0):
+def _heading_line_page(lines, keys, start=0, skip=None):
     """Cari halaman (1-based) tempat sebuah heading muncul sebagai
     BARIS JUDUL (bukan kalimat isi, bukan baris daftar isi).
     Dipakai _expected_labels (verifikasi + koreksi label dari PDF
@@ -1071,14 +1071,22 @@ def _heading_line_page(lines, keys, start=0):
     biasa TIDAK dipakai di sini: frasa judul sering muncul juga
     di kalimat isi (mis. 'tujuan umum dan khusus' di Latar
     Belakang), dan baris daftar isi memuat teks semua entri —
-    keduanya memberi halaman yang salah."""
+    keduanya memberi halaman yang salah. skip = indeks halaman
+    (0-based) yang dilewati (mis. halaman enumerasi bab)."""
     for kind, pat in keys:
         for pi in range(start, len(lines)):
+            if skip and pi in skip:
+                continue
             page_lines = [ln for ln in lines[pi]
                           if not _is_toc_line(ln)]
             cands = list(page_lines)
             for a, b in zip(page_lines, page_lines[1:]):
                 cands.append(a + " " + b)
+            # Judul yang terbelah tiga baris (mis. 'BAB V' / 'PENUTU'
+            # / 'P' pada Gusti Ayu) juga dicocokkan.
+            for a, b, c in zip(page_lines, page_lines[1:],
+                               page_lines[2:]):
+                cands.append(a + " " + b + " " + c)
             for cand in cands:
                 if kind == "bab":
                     if re.search(rf"BAB\s+{pat}\b(?![IVXLC])", cand,
@@ -1728,8 +1736,11 @@ def _strip_page_field_el(p_el):
 def _strip_leading_number(line):
     """Buang awalan penomoran ('1.1 ', 'A. ', 'IV. ') dari baris
     judul — nomor list di PDF tidak selalu sama dengan teks entri
-    (nomor list dirender LibreOffice, display entri beda lagi)."""
-    return re.sub(r"^(?:\d+(?:\.\d+)*\.?|[A-Za-z]\.|[IVXLCDM]+\.)\s+",
+    (nomor list dirender LibreOffice, display entri beda lagi).
+    Penomoran gaya '1) ' / 'a) ' juga dibuang: beberapa dokumen
+    (mis. Gusti Ayu) menomori sub-judul dengan kurung tutup,
+    dan tanpanya baris judul tidak cocok dengan teks entri."""
+    return re.sub(r"^(?:\d+(?:\.\d+)*[.)]?|[A-Za-z][.)]|[IVXLCDM]+[.)])\s+",
                   "", line)
 
 
@@ -2464,15 +2475,51 @@ def _heading_page_out(pages_lines, entry):
     return found
 
 
+def _enum_pages(lines, entries):
+    """Indeks halaman (0-based) yang memuat >=2 judul BAB sebagai
+    baris judul — mis. paragraf Sistematika Penulisan yang
+    menyebut semua bab. Halaman seperti itu bukan halaman judul
+    BAB, jadi pencarian judul BAB harus melewatinya."""
+    babs = [e for e in entries if e.get("kind") == "bab"]
+    out = set()
+    for pi, page_lines in enumerate(lines):
+        n = 0
+        for e in babs:
+            keys = e.get("search") or [("text", e["text"])]
+            if _heading_line_page([page_lines], keys, 0) is not None:
+                n += 1
+                if n >= 2:
+                    out.add(pi)
+                    break
+    return out
+
+
+def _bab1_title_page(pages, lines, entries):
+    """Halaman judul BAB I di PDF hasil, dicari sebagai BARIS JUDUL
+    (bukan substring terakhir): paragraf Sistematika Penulisan
+    menyebut semua judul BAB, jadi substring 'BAB I PENDAHULUAN'
+    ketemu terakhir di halaman Sistematika — bab1 jadi 5 halaman
+    terlalu besar dan semua label isi ikut bergeser (UJI_COBA_2
+    v0.6.22). Cadangan: kemunculan substring terakhir (perilaku
+    lama, bila baris judul tidak ketemu)."""
+    bab = next((e for e in entries if e.get("kind") == "bab"), None)
+    keys = (bab.get("search") or [("text", bab["text"])]
+            if bab is not None else [("text", "BAB I PENDAHULUAN")])
+    pg = _heading_line_page(lines, keys, 0)
+    if pg is not None:
+        return pg
+    hits = [i + 1 for i, t in enumerate(pages)
+            if _page_contains(t, "BAB I PENDAHULUAN")]
+    return hits[-1] if hits else None
+
+
 def verify_output(pdf_path, entries):
     """Verifikasi: hitung ulang label dari PDF HASIL dan bandingkan
     dengan label di daftar isi."""
     pages = pdf_pages_text(pdf_path)
     lines = pdf_pages_lines(pdf_path)
-    # BAB I = halaman kemunculan terakhir "BAB I PENDAHULUAN" di PDF hasil.
-    bab1_hits = [i + 1 for i, t in enumerate(pages)
-                 if _page_contains(t, "BAB I PENDAHULUAN")]
-    bab1 = bab1_hits[-1] if bab1_hits else None
+    # BAB I = halaman judulnya (baris judul, bukan substring terakhir).
+    bab1 = _bab1_title_page(pages, lines, entries)
     mismatches = []
     for e, (pdf_page, expect) in zip(
             entries, _expected_labels(pages, lines, entries, bab1)):
@@ -2484,13 +2531,36 @@ def verify_output(pdf_path, entries):
 
 
 
+def _arabic1_page(lines, title_page):
+    """Halaman (1-based) tempat penomoran Arab mulai — yaitu halaman
+    yang footernya '1'. Bila BAB I mulai di tengah halaman (mis.
+    Gusti Ayu: judul BAB I di bawah DAFTAR GAMBAR), halaman judulnya
+    masih berfooter Romawi ('xii') dan Arab '1' baru di halaman
+    berikut; memakai halaman judul sebagai bab1 membuat semua label
+    isi 1 terlalu besar. Bila tidak ketemu, kembalikan halaman judul
+    (perilaku lama)."""
+    if title_page is None:
+        return None
+    for pi in range(title_page - 1,
+                    min(title_page + 1, len(lines))):
+        last = [ln.strip() for ln in lines[pi] if ln.strip()]
+        if last and last[-1] == "1":
+            return pi + 1
+    return title_page
+
+
 def _expected_labels(pages, lines, entries, bab1):
     """Untuk tiap entri, hitung (pdf_page, label) dari PDF — dipakai
     verifikasi dan koreksi label. Logika sama seperti verify_output:
     entri halaman depan dicari dari kemunculan pertama (post_anchor:
     terakhir), entri isi dicari berurutan mulai dari halaman BAB I
     agar tidak ketemu baris daftar isi duluan."""
-    pointer = (bab1 - 1) if bab1 is not None else 0
+    title_page = bab1
+    # v0.6.23: label dihitung dari halaman Arab '1', bukan halaman
+    # judul BAB I (keduanya sama bila BAB I mulai di halaman baru).
+    arabic1 = _arabic1_page(lines, bab1) if bab1 is not None else None
+    pointer = (title_page - 1) if title_page is not None else 0
+    skip = _enum_pages(lines, entries)
     out = []
     for e in entries:
         keys = e.get("search") or [("text", e["text"])]
@@ -2500,26 +2570,19 @@ def _expected_labels(pages, lines, entries, bab1):
             else:
                 pdf_page = _find_key(pages, keys, 0)
         else:
-            # v0.6.13: pencarian baris judul (_heading_line_page)
-            # HANYA bila pointer masih di halaman daftar isi — di
-            # sanalah substring (_find_key) salah ketemu baris TOC
-            # (perangkap revisi nifas __1: judul BAB I di bawah
-            # halaman TOC, semua label jadi '1'). Di halaman isi,
-            # pakai substring semula (perilaku v0.6.12): judul
-            # panjang/berulang Gusti Ayu ketemu di urutan yang benar
-            # dan tidak ada baris TOC yang mengganggu. Bila metode
-            # utama tidak ketemu, jatuh ke metode satunya.
-            _on_toc = (0 <= pointer < len(lines)
-                       and any(_is_toc_line(ln)
-                               for ln in lines[pointer]))
-            if _on_toc:
-                pdf_page = _heading_line_page(lines, keys, pointer)
-                if pdf_page is None:
-                    pdf_page = _find_key(pages, keys, pointer)
-            else:
+            # v0.6.23: cari BARIS JUDUL dulu — substring ketemu
+            # frasa judul di kalimat isi (paragraf Sistematika
+            # Penulisan menyebut semua judul BAB) dan memberi
+            # halaman yang salah (UJI_COBA_2 v0.6.22: BAB II jadi
+            # 1, BAB III–V 5 halaman terlalu kecil). Yang tidak
+            # ketemu sebagai baris judul jatuh ke substring (judul
+            # panjang/terbelah, perilaku v0.6.12). Untuk entri BAB,
+            # halaman enumerasi (memuat >1 judul BAB) dilewati.
+            sk = skip if e.get("kind") == "bab" else None
+            pdf_page = _heading_line_page(lines, keys, pointer,
+                                          skip=sk)
+            if pdf_page is None:
                 pdf_page = _find_key(pages, keys, pointer)
-                if pdf_page is None:
-                    pdf_page = _heading_line_page(lines, keys, pointer)
             if pdf_page is not None:
                 pointer = pdf_page - 1
         if pdf_page is None:
@@ -2527,8 +2590,11 @@ def _expected_labels(pages, lines, entries, bab1):
             continue
         if e["kind"] == "front":
             expect = to_roman(pdf_page)
-        elif bab1 is not None:
-            expect = str(pdf_page - bab1 + 1)
+        elif arabic1 is not None:
+            # Judul BAB I yang mulai di tengah halaman duduk di halaman
+            # judul (berfooter Romawi, satu halaman sebelum Arab '1'):
+            # labelnya 1, bukan 0 (dan bukan negatif).
+            expect = str(max(1, pdf_page - arabic1 + 1))
         else:
             expect = str(pdf_page)
         out.append((pdf_page, expect))
@@ -2544,9 +2610,7 @@ def _fix_labels_from_output(pdf_path, entries, gambar, tabel):
     daftar isi tidak mengubah pagination, jadi satu rebuild cukup."""
     pages = pdf_pages_text(pdf_path)
     lines = pdf_pages_lines(pdf_path)
-    bab1_hits = [i + 1 for i, t in enumerate(pages)
-                 if _page_contains(t, "BAB I PENDAHULUAN")]
-    bab1 = bab1_hits[-1] if bab1_hits else None
+    bab1 = _bab1_title_page(pages, lines, entries)
     changed = False
     for lst in (entries, gambar, tabel):
         for e, (_pg, expect) in zip(
@@ -2925,6 +2989,43 @@ def process(docx_path, work_dir, include_lists=True):
     except Exception:
         # verifikasi gagal (mis. LibreOffice sibuk): pakai hasil
         # footer pass pertama apa adanya; jangan gagalkan pipeline.
+        pass
+
+    # v0.6.23: label dari pdf_out bisa basi — footer pass mengubah
+    # pagination (hapus w:cols di sectPr penutup BAB I, pindah
+    # sectPr continuous), sehingga render akhir punya halaman
+    # lebih banyak (nifas: 30 -> 32) dan label isi jadi 1 terlalu
+    # kecil — padahal verifikasi di atas memakai pdf_out, jadi
+    # cacat ini lolos. Hitung ulang label dari render AKHIR
+    # (final_pdf); bila berubah, rebuild + footer pass sekali
+    # lagi. Angka TOC tidak mengubah pagination, jadi satu
+    # iterasi cukup; verifikasi laporan diambil dari render
+    # terbaru.
+    try:
+        if final_pdf is not None and _fix_labels_from_output(
+                final_pdf, entries, gambar, tabel):
+            build_output_docx(docx_path, entries, out_docx,
+                              gambar=gambar, tabel=tabel,
+                              normalize_pre_bab=normalize_pre_bab)
+            _pages4 = list(bab_new_pages) if bab_new_pages else []
+            if footer_forced and _pages4:
+                _pages4[0] = True
+            add_footer_page_numbers(
+                out_docx, entries,
+                bab_new_page=True if footer_forced else bab_new_page,
+                bab_new_pages=_pages4,
+                force_bab1_page_break=footer_forced)
+            _akhir4 = os.path.join(work_dir, "_akhir4.docx")
+            shutil.copy(out_docx, _akhir4)
+            _pdf4 = render_pdf(_akhir4, work_dir)
+            final_pdf = _pdf4
+            pages_final = len(pdf_pages_text(_pdf4))
+            mismatches = verify_output(_pdf4, entries)
+            mismatches_gambar = (verify_output(_pdf4, gambar)
+                                 if gambar else [])
+            mismatches_tabel = (verify_output(_pdf4, tabel)
+                                if tabel else [])
+    except Exception:
         pass
 
     # v0.6.22: AI Document Checker — laporan peringatan saja, tidak
