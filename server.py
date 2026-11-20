@@ -83,7 +83,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.11"  # v0.6.11: halaman pertama BAB I tampil "1" Arab tengah
+VERSION = "0.6.12"  # v0.6.12: deteksi daftar isi lama tidak lagi syarat gaya Normal/TOC — baris lama bergaya 'Body Text' (revisi nifas __1) kini ikut terhapus, bukan jadi entri duplikat
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 

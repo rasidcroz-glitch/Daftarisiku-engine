@@ -197,22 +197,36 @@ RE_LAMPIRAN = re.compile(r"^LAMPIRAN\s+\d+\b", re.IGNORECASE)
 # (nomornya terhapus). Judul asli tidak pernah diakhiri pola itu, jadi
 # pola ini aman dipakai sebagai penanda baris daftar isi lama yang
 # harus diabaikan (dan dihapus dari hasil).
-RE_OLD_TOC_LINE = re.compile(
+RE_OLD_TOC_STRONG = re.compile(
     r"(?:\t\s*([0-9]+|[ivxlcdm]+)?\s*$"
     r"|\.{2,}\s*([0-9]+|[ivxlcdm]+)\s*$"
-    r"|…+\s*([0-9]+|[ivxlcdm]+)\s*$"
-    r"| {2,}\s*([0-9]+|[ivxlcdm]+)\s*$)",
+    r"|…+\s*([0-9]+|[ivxlcdm]+)\s*$)",
     re.IGNORECASE)
+RE_OLD_TOC_SPACES = re.compile(
+    r" {2,}\s*([0-9]+|[ivxlcdm]+)\s*$", re.IGNORECASE)
 
 
 def _is_old_toc_line(p):
-    """True bila paragraf ini baris daftar isi lama: gaya Normal (atau
-    gaya TOC Word) dan teksnya diakhiri tab/titik-titik + nomor halaman.
-    Dipakai raw text (bukan norm) karena norm() menghapus tab."""
+    """True bila paragraf ini baris daftar isi lama: teksnya diakhiri
+    tab/titik-titik + nomor halaman.
+    Dipakai raw text (bukan norm) karena norm() menghapus tab.
+    v0.6.12: gaya tidak lagi disyaratkan Normal/TOC — daftar lama
+    pada revisi nifas __1 bergaya 'Body Text' sehingga lolos dari
+    deteksi dan ikut jadi entri (duplikat BAB, nomor '?' dan huruf
+    salah). Sinyal kuat (tab / titik-titik / elipsis + nomor) berlaku
+    untuk semua gaya KECUALI Heading (judul asli tidak pernah jadi
+    baris daftar lama); sinyal lemah (spasi ganda + nomor) tetap
+    hanya untuk Normal/TOC seperti sebelumnya."""
     style = p.style.name
-    if style != "Normal" and not style.startswith("TOC"):
+    if style in ("Heading 1", "Heading 2", "Heading 3"):
         return False
-    return bool(RE_OLD_TOC_LINE.search(p.text or ""))
+    text = p.text or ""
+    if RE_OLD_TOC_STRONG.search(text):
+        return True
+    if (style == "Normal" or style.startswith("TOC")) \
+            and RE_OLD_TOC_SPACES.search(text):
+        return True
+    return False
 
 
 def _para_has_page_break(p):
