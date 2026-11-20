@@ -1195,6 +1195,23 @@ def _normalize_pre_bab_headings(doc, entries):
     return moved
 
 
+def _enable_update_fields(doc):
+    """v0.6.15: minta Word memperbarui semua field saat dokumen dibuka
+    (w:updateFields di settings.xml). Field PAGE di footer dibuat
+    dengan nilai cache '1'; Word yang tidak menghitung ulang field
+    saat buka (apalagi dalam Compatibility Mode) akan menampilkan
+    '1' di semua halaman — halaman depan yang seharusnya Romawi
+    (ii, iii, ...) ikut jadi '1'. Dengan updateFields, Word
+    menghitung ulang PAGE saat buka sehingga Romawi dan Arab tampil
+    benar tanpa perlu tekan F9."""
+    settings = doc.settings.element
+    for old in settings.findall(qn("w:updateFields")):
+        settings.remove(old)
+    el = OxmlElement("w:updateFields")
+    el.set(qn("w:val"), "true")
+    settings.append(el)
+
+
 def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
                       normalize_pre_bab=False):
     """Sisipkan daftar isi setelah heading 'DAFTAR ISI' (atau sebelum
@@ -1372,6 +1389,7 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
             t_made.append(add_entry(disp(e), e["page"], 0, False))
         insert_after_seq(t_anchor, t_made)
 
+    _enable_update_fields(doc)
     doc.save(out_path)
     return out_path
 
