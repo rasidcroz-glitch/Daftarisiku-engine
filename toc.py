@@ -2583,6 +2583,100 @@ def _bab1_footer_text(pdf_path, entries):
 
 
 # ---------------------------------------------------------------- pipeline
+def check_document(docx_path, entries, gambar, tabel, mismatches):
+    """AI Document Checker (v0.6.22) — pemeriksaan aturan struktur
+    dokumen (tanpa API, laporan saja, TIDAK mengubah dokumen).
+    Mengembalikan list peringatan {"code", "message"}:
+    - bab_format: judul BAB tidak konsisten (campur "BAB I" Romawi
+      dan "BAB 1" Arab, atau "Bab" vs "BAB").
+    - num_gap: penomoran sub-bab loncat (mis. 1.1 lalu 1.3) atau
+      sub-sub muncul tanpa induknya (1.1.1 tanpa 1.1).
+    - caption_tabel / caption_gambar: ada tabel/gambar di dokumen
+      yang tidak punya keterangan bernomor "Tabel X.Y"/"Gambar X.Y".
+    - page_unverified: ada entri yang nomor halamannya tidak
+      terverifikasi dari PDF hasil.
+    """
+    warnings = []
+    # --- 1. format judul BAB ---
+    babs = [e for e in entries if e.get("kind") == "bab"]
+    if len(babs) >= 2:
+        forms = set()
+        for b in babs:
+            t = (b.get("display") or b.get("text") or "").strip()
+            m = re.match(r"(?i)^(BAB)\s+([IVXLCDM]+|\d+)\b", t)
+            if m:
+                kind = ("romawi" if re.fullmatch(r"[IVXLCDM]+", m.group(2))
+                        else "arab")
+                forms.add(kind)
+        if len(forms) > 1:
+            warnings.append({
+                "code": "bab_format",
+                "message": ("Judul BAB tidak konsisten: ada yang memakai "
+                            "angka Romawi (BAB I) dan ada yang Arab (BAB 1). "
+                            "Samakan semuanya.")})
+    # --- 2. penomoran sub-bab (hanya awalan angka, mis. 1.1 / 1.1.1) ---
+    seen = {}  # parent -> set(last)
+    parents = set()
+    for e in entries:
+        if e.get("level", 0) < 2:
+            continue
+        t = (e.get("display") or e.get("text") or "").strip()
+        m = re.match(r"^(\d+(?:\.\d+)*)\b", t)
+        if not m:
+            continue
+        parts = m.group(1).split(".")
+        parents.add(m.group(1))
+        if len(parts) >= 2:
+            parent = ".".join(parts[:-1])
+            try:
+                seen.setdefault(parent, set()).add(int(parts[-1]))
+            except ValueError:
+                pass
+    for parent, nums in sorted(seen.items()):
+        ordered = sorted(nums)
+        if ordered and ordered != list(range(min(ordered), max(ordered) + 1)):
+            warnings.append({
+                "code": "num_gap",
+                "message": (f"Penomoran sub-bab di bawah {parent} loncat: "
+                            f"ada {', '.join(str(n) for n in ordered)} "
+                            f"(seharusnya berurutan).")})
+        if parent not in parents:
+            warnings.append({
+                "code": "num_gap",
+                "message": (f"Sub-bab {parent}.* muncul tanpa induk "
+                            f"{parent} (tidak ada heading {parent}).")})
+    # --- 3. tabel/gambar tanpa keterangan bernomor ---
+    try:
+        _d = Document(docx_path)
+        n_tables = len(_d.tables)
+        n_images = len(_d.inline_shapes)
+    except Exception:
+        n_tables = n_images = 0
+    if n_tables > len(tabel):
+        warnings.append({
+            "code": "caption_tabel",
+            "message": (f"Ada {n_tables} tabel di dokumen, tapi hanya "
+                        f"{len(tabel)} yang punya keterangan bernomor "
+                        f"('Tabel X.Y'). {n_tables - len(tabel)} tabel "
+                        f"tanpa keterangan tidak masuk Daftar Tabel.")})
+    if n_images > len(gambar):
+        warnings.append({
+            "code": "caption_gambar",
+            "message": (f"Ada {n_images} gambar di dokumen, tapi hanya "
+                        f"{len(gambar)} yang punya keterangan bernomor "
+                        f"('Gambar X.Y'). {n_images - len(gambar)} gambar "
+                        f"tanpa keterangan tidak masuk Daftar Gambar.")})
+    # --- 4. nomor halaman tak terverifikasi ---
+    if mismatches:
+        warnings.append({
+            "code": "page_unverified",
+            "message": (f"{len(mismatches)} entri nomor halamannya tidak "
+                        f"bisa diverifikasi dari PDF hasil "
+                        f"(mis. {mismatches[0][0]} hal. {mismatches[0][1]}). "
+                        f"Cek manual nomor-nomor itu.")})
+    return warnings
+
+
 def process(docx_path, work_dir, include_lists=True):
     """Pipeline lengkap. Kembalikan dict laporan + path hasil.
     include_lists=False: DAFTAR GAMBAR / DAFTAR TABEL tidak dibuat
@@ -2833,6 +2927,14 @@ def process(docx_path, work_dir, include_lists=True):
         # footer pass pertama apa adanya; jangan gagalkan pipeline.
         pass
 
+    # v0.6.22: AI Document Checker — laporan peringatan saja, tidak
+    # mengubah dokumen; gagalnya checker tidak menggagalkan pipeline.
+    try:
+        checker_warnings = check_document(docx_path, entries, gambar,
+                                          tabel, mismatches)
+    except Exception:
+        checker_warnings = []
+
     return {
         "entries": entries,
         "daftar_gambar": gambar,
@@ -2852,6 +2954,7 @@ def process(docx_path, work_dir, include_lists=True):
         "mismatches": mismatches,
         "mismatches_gambar": mismatches_gambar,
         "mismatches_tabel": mismatches_tabel,
+        "checker_warnings": checker_warnings,
     }
 
 
