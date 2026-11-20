@@ -83,7 +83,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.13"  # v0.6.13: (1) sub-heading pra-BAB yang yatim dipindah ke setelah judul BAB (revisi nifas __1: "1.1 Latar Belakang" tidak lagi sendiri di hal. 7); (2) footer BAB I diverifikasi dari render akhir dan dipaksa jadi "1" bila masih Romawi; (3) batas section daftar lama hanya dipertahankan bila kolom section berbeda; (4) _strip_page_field kini membuang hasil-cache field PAGE (tidak ada lagi angka ganda "11" di footer)
+VERSION = "0.6.14"  # v0.6.14: (1) isi BAB I mengalir di halaman judul pada jalur paksa (revisi nifas __1: run break halaman sesudah sectPr penutup hanya bila sectPr dipindah, bukan pada jalur _forced_title); (2) BAB II-V nomor halaman pertama di tengah: section BAB yang continuous dibelah tepat sebelum judul (sectPr continuous baru) + "mulai di halaman baru" dinilai juga dari sinyal struktural, bukan hanya render PDF pra-footer (Light Cloud: BAB II-IV bab_new_pages False)
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
