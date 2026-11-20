@@ -12,10 +12,16 @@ Endpoint:
                                maks 10 MB). Field opsional
                                "include_lists" ("0" = jangan buat
                                DAFTAR GAMBAR/TABEL; default buat).
-                               Balasan JSON: {job, toc_text,
-                               entries, daftar_gambar, daftar_tabel,
-                               pages_in, pages_out, verification,
-                               download_url}. Pratinjau gratis.
+                               ASINKRON (v0.6.17): langsung balas 202
+                               {job, status: "queued"}; proses jalan
+                               di thread latar (satu dokumen dalam
+                               satu waktu) dan hasilnya dicek lewat
+                               GET /api/status/<job>. Alasannya:
+                               dokumen berat (4 MB, 147 hal) butuh
+                               ~46 detik, sementara hosting memutus
+                               request yang lebih dari ~20 detik
+                               (503) — alur sinkron lama mentok di
+                               website untuk file sebesar itu.
   POST /api/pay/mock/<job>  -> PROTOTIPE SAJA: menandai job sudah dibayar.
                                Tetap ada untuk tes, tapi website sudah
                                tidak memakainya.
@@ -30,10 +36,19 @@ Endpoint:
   GET  /api/qr/<job>        -> Gambar PNG kode QRIS charge yang sedang
                                aktif (dibuat server dari qr_string
                                Midtrans). 404 bila belum ada charge.
-  GET  /api/status/<job>     -> {job, paid, amount, filename}; 404 bila
-                               job tidak ada/kedaluwarsa. Dipakai website
-                               untuk mengecek status bayar (mis. setelah
-                               refresh) sebelum membuka tombol download.
+  GET  /api/status/<job>     -> {job, status, paid, amount, filename,
+                               qris, qris_expired}; status =
+                               "queued" | "processing" | "done" |
+                               "error". Bila "done", balasan juga
+                               membawa hasil pratinjau (entries,
+                               daftar_gambar, daftar_tabel, pages_in,
+                               pages_out, verification, download_url)
+                               supaya website bisa menampilkan
+                               pratinjau dari polling ini. 404 bila
+                               job tidak ada/kedaluwarsa. Dipakai
+                               website untuk mengecek status proses
+                               dan status bayar (mis. setelah refresh)
+                               sebelum membuka tombol download.
   GET  /api/download/<job>  -> file .docx hasil; 402 bila belum dibayar.
 
 Keamanan/batas:
@@ -53,6 +68,7 @@ import base64
 import io
 import json
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -83,7 +99,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.16"  # v0.6.16: (1) _remove_old_toc_runs kini mempertahankan batas section bila pgNumType-nya beda dengan section berikut (batas Romawi->Arab) — proposal Gunak: halaman depan kembali Romawi, BAB I restart "1"; (2) entri sesudah DAFTAR PUSTAKA tidak lagi jadi butir daftar isi (referensi pendek lolos gerbang 'short'). v0.6.15: settings updateFields=true — Word menghitung ulang field PAGE saat buka, jadi nomor Romawi/Arab tidak lagi tampil '1' semua.
+VERSION = "0.6.17"  # v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done). v0.6.16: (1) _remove_old_toc_runs kini mempertahankan batas section bila pgNumType-nya beda dengan section berikut (batas Romawi->Arab) — proposal Gunak: halaman depan kembali Romawi, BAB I restart "1"; (2) entri sesudah DAFTAR PUSTAKA tidak lagi jadi butir daftar isi (referensi pendek lolos gerbang 'short'). v0.6.15: settings updateFields=true — Word menghitung ulang field PAGE saat buka, jadi nomor Romawi/Arab tidak lagi tampil '1' semua.
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
@@ -297,6 +313,127 @@ def _too_large(_exc):
     return jsonify({"error": f"file terlalu besar (maks {MAX_BYTES // (1024 * 1024)} MB)"}), 413
 
 
+# --- antrean proses asinkron (v0.6.17) -------------------------------
+# /api/toc sinkron mentok di hosting gratis: request yang lebih dari
+# ~20 detik diputus platform (503), sementara dokumen berat butuh
+# 46 detik lebih (UJI_COBA_2: 4 MB, 147 hal, 92 tabel). Jadi upload
+# hanya mengantrekan pekerjaan dan langsung membalas 202; satu worker
+# thread latar memproses antrean FIFO satu dokumen dalam satu waktu
+# (dua LibreOffice bersamaan langsung melewati 512 MB). Status +
+# hasil tersimpan di file {job}.job.json (tulis atomik) supaya
+# GET /api/status bisa menjawab walau worker sempat di-recycle.
+JOB_QUEUE = queue.Queue()
+_JOB_STATE_LOCK = threading.Lock()
+_JOB_STALE_SECONDS = 10 * 60  # "processing" lebih tua dari ini = terhenti
+
+
+def _job_state_path(job):
+    return os.path.join(RESULTS_DIR, f"{job}.job.json")
+
+
+def _save_job_state(job, state):
+    tmp = _job_state_path(job) + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, _job_state_path(job))
+    except OSError:
+        pass
+
+
+def _load_job_state(job):
+    try:
+        with open(_job_state_path(job)) as f:
+            return json.load(f) or {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _update_job_state(job, **fields):
+    with _JOB_STATE_LOCK:
+        state = _load_job_state(job)
+        state.update(fields)
+        state["updated_at"] = int(time.time())
+        _save_job_state(job, state)
+        return state
+
+
+def _queue_position(job):
+    """Posisi job di antrean (0 = paling depan, giliran berikutnya)."""
+    try:
+        items = list(JOB_QUEUE.queue)
+    except Exception:  # noqa: BLE001 - antrean tidak bisa dibaca
+        return None
+    for i, item in enumerate(items):
+        if item.get("job") == job:
+            return i
+    return None
+
+
+def _toc_result_payload(rep, job):
+    """Bentuk hasil pratinjau yang sama seperti balasan /api/toc lama."""
+    return {
+        "toc_text": rep["toc_text"],
+        "entries": [{"text": e["text"], "display": e.get("display") or e["text"],
+                     "level": e["level"], "page": e["page"]} for e in rep["entries"]],
+        "daftar_gambar": [{"text": e["text"], "display": e.get("display") or e["text"],
+                           "page": e["page"]} for e in rep["daftar_gambar"]],
+        "daftar_tabel": [{"text": e["text"], "display": e.get("display") or e["text"],
+                          "page": e["page"]} for e in rep["daftar_tabel"]],
+        "pages_in": rep["pages_in"],
+        "pages_out": rep["pages_out"],
+        "verification": "lolos" if not rep["mismatches"] else rep["mismatches"],
+        "download_url": f"/api/download/{job}",
+        "download_expires_hours": JOB_TTL_SECONDS // 3600,
+    }
+
+
+def _job_worker():
+    """Satu worker latar: ambil job dari antrean, proses, simpan hasil."""
+    while True:
+        item = JOB_QUEUE.get()
+        job = item["job"]
+        try:
+            _update_job_state(job, status="processing")
+            rep = process(item["src"], item["work"],
+                          include_lists=item["include_lists"])
+            out_path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
+            shutil.move(rep["output_docx"], out_path)
+            # v0.6.7: simpan nama file asli supaya nama download mengikuti
+            # file yang di-upload (bukan "skripsi-daftar-isi.docx" terus).
+            try:
+                with open(os.path.join(RESULTS_DIR, f"{job}.meta.json"),
+                          "w") as mf:
+                    json.dump({"filename": item["filename"]}, mf)
+            except OSError:
+                pass
+            _update_job_state(job, status="done",
+                              result=_toc_result_payload(rep, job))
+        except Exception as exc:  # noqa: BLE001 - pesan error ke pengguna
+            _update_job_state(job, status="error",
+                              error=f"gagal memproses dokumen: {exc}")
+        finally:
+            shutil.rmtree(item["work"], ignore_errors=True)
+            JOB_QUEUE.task_done()
+
+
+_worker_started = False
+_worker_lock = threading.Lock()
+
+
+def _ensure_worker():
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            t = threading.Thread(target=_job_worker, daemon=True,
+                                 name="toc-worker")
+            t.start()
+            _worker_started = True
+
+
+_ensure_worker()
+
+
 # --- endpoint ---------------------------------------------------------
 @app.get("/api/health")
 def health():
@@ -309,6 +446,9 @@ def make_toc():
     # TANPA login: pratinjau GRATIS untuk siapa saja. Pembayaran hanya
     # mengunci DOWNLOAD (cek di /api/download). Tanpa akun, hasil tidak
     # tersimpan per pengguna — link download berlaku 24 jam.
+    # ASINKRON (v0.6.17): hanya terima + antrekan, langsung balas 202.
+    # Proses berat jalan di worker latar; hasilnya dicek lewat
+    # GET /api/status/<job> (website polling tiap ~2 detik).
     if "file" not in request.files:
         return jsonify({"error": "field 'file' (.docx) wajib diisi"}), 400
     f = request.files["file"]
@@ -323,37 +463,18 @@ def make_toc():
     include_lists = include_lists not in ("0", "false", "False", "no")
     try:
         f.save(src)
-        rep = process(src, work, include_lists=include_lists)
     except Exception as exc:  # noqa: BLE001 - pesan error ke pengguna
         shutil.rmtree(work, ignore_errors=True)
-        return jsonify({"error": f"gagal memproses dokumen: {exc}"}), 422
-
-    out_path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
-    shutil.move(rep["output_docx"], out_path)
-    # v0.6.7: simpan nama file asli supaya nama download mengikuti
-    # file yang di-upload (bukan "skripsi-daftar-isi.docx" terus).
-    try:
-        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json"),
-                  "w") as mf:
-            json.dump({"filename": filename}, mf)
-    except OSError:
-        pass
-    shutil.rmtree(work, ignore_errors=True)
-    return jsonify({
-        "job": job,
-        "toc_text": rep["toc_text"],
-        "entries": [{"text": e["text"], "display": e.get("display") or e["text"],
-                     "level": e["level"], "page": e["page"]} for e in rep["entries"]],
-        "daftar_gambar": [{"text": e["text"], "display": e.get("display") or e["text"],
-                           "page": e["page"]} for e in rep["daftar_gambar"]],
-        "daftar_tabel": [{"text": e["text"], "display": e.get("display") or e["text"],
-                          "page": e["page"]} for e in rep["daftar_tabel"]],
-        "pages_in": rep["pages_in"],
-        "pages_out": rep["pages_out"],
-        "verification": "lolos" if not rep["mismatches"] else rep["mismatches"],
-        "download_url": f"/api/download/{job}",
-        "download_expires_hours": JOB_TTL_SECONDS // 3600,
-    })
+        return jsonify({"error": f"gagal menyimpan file: {exc}"}), 422
+    now = int(time.time())
+    _save_job_state(job, {"job": job, "status": "queued",
+                          "filename": filename,
+                          "include_lists": include_lists,
+                          "created_at": now, "updated_at": now})
+    _ensure_worker()
+    JOB_QUEUE.put({"job": job, "src": src, "work": work,
+                   "filename": filename, "include_lists": include_lists})
+    return jsonify({"job": job, "status": "queued"}), 202
 
 
 @app.post("/api/pay/mock/<job>")
@@ -514,8 +635,13 @@ def qris_image(job):
 
 @app.get("/api/status/<job>")
 def status(job):
-    """Cek status bayar sebuah job tanpa men-download.
-    Dipakai website setelah refresh halaman (job tersimpan di
+    """Cek status proses + status bayar sebuah job.
+    Dipakai website (v0.6.17) sebagai polling saat menunggu proses
+    selesai (tiap ~2 detik): status "queued"/"processing" berarti
+    masih jalan; "done" membawa hasil pratinjau (entries,
+    daftar_gambar, daftar_tabel, pages_in, dst.) supaya pratinjau
+    bisa dirender dari polling ini; "error" membawa pesan gagal.
+    Dipakai juga setelah refresh halaman (job tersimpan di
     localStorage), sebelum tombol download dibuka, dan sebagai
     polling saat menunggu pembayaran QRIS: bila ada charge QRIS
     yang masih pending, status transaksi ditanyakan ke Midtrans
@@ -524,8 +650,40 @@ def status(job):
     qris_expired=true supaya website menawarkan QR baru."""
     if not job.isalnum() or len(job) > 32:
         return jsonify({"error": "job tidak valid"}), 400
-    path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
-    if not os.path.exists(path):
+    state = _load_job_state(job)
+    out_path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
+
+    # Job masih dalam antrean/proses (v0.6.17): laporkan statusnya.
+    if state.get("status") in ("queued", "processing"):
+        # Worker terhenti (mis. worker di-recycle gunicorn saat proses
+        # berjalan): status tidak diperbarui >10 menit -> anggap gagal.
+        if state["status"] == "processing" and \
+                int(time.time()) - int(state.get("updated_at") or 0) \
+                > _JOB_STALE_SECONDS:
+            _update_job_state(
+                job, status="error",
+                error="proses terhenti di server, silakan upload ulang dokumenmu.")
+            return jsonify({
+                "job": job, "status": "error",
+                "error": "proses terhenti di server, silakan upload ulang dokumenmu.",
+                "paid": False, "amount": PRICE_IDR,
+                "filename": state.get("filename"),
+                "qris": None, "qris_expired": False})
+        pos = _queue_position(job) if state["status"] == "queued" else None
+        return jsonify({"job": job, "status": state["status"],
+                        "queue_position": pos,
+                        "paid": False, "amount": PRICE_IDR,
+                        "filename": state.get("filename"),
+                        "qris": None, "qris_expired": False})
+    if state.get("status") == "error":
+        return jsonify({"job": job, "status": "error",
+                        "error": state.get("error") or "gagal memproses dokumen.",
+                        "paid": False, "amount": PRICE_IDR,
+                        "filename": state.get("filename"),
+                        "qris": None, "qris_expired": False})
+
+    # Job selesai (atau job lama tanpa state): butuh file hasil.
+    if not os.path.exists(out_path):
         return jsonify({"error": "hasil tidak ditemukan atau sudah kedaluwarsa (24 jam)"}), 404
     filename = None
     try:
@@ -571,10 +729,15 @@ def status(job):
             qris_expired = True
     elif not paid and rec.get("status") in ("expire", "cancel", "deny"):
         qris_expired = True
-    return jsonify({"job": job, "paid": paid,
-                    "amount": PRICE_IDR, "filename": filename,
-                    "qris": None if paid else _qris_info(job, rec),
-                    "qris_expired": qris_expired})
+    resp = {"job": job, "status": "done", "paid": paid,
+            "amount": PRICE_IDR, "filename": filename,
+            "qris": None if paid else _qris_info(job, rec),
+            "qris_expired": qris_expired}
+    # Hasil pratinjau (v0.6.17) supaya website bisa merender pratinjau
+    # dari polling status; job lama tanpa state tidak membawanya dan
+    # website memakai pratinjau tersimpan di localStorage.
+    resp.update(state.get("result") or {})
+    return jsonify(resp)
 
 
 @app.get("/api/download/<job>")

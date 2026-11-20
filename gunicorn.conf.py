@@ -15,7 +15,11 @@ timeout = int(os.environ.get("GUNICORN_TIMEOUT", "300"))
 graceful_timeout = 30
 keepalive = 5
 loglevel = os.environ.get("LOG_LEVEL", "info")
-# Restart worker tiap 50 request agar memori LibreOffice yang bocor
-# pelan-pelan tidak menumpuk.
-max_requests = int(os.environ.get("GUNICORN_MAX_REQUESTS", "50"))
+# Restart worker tiap 1000 request agar memori LibreOffice yang bocor
+# pelan-pelan tidak menumpuk. v0.6.17: angka lama (50) terlalu kecil
+# untuk alur async — proses jalan di thread latar worker dan polling
+# website tiap ~2 detik menghabiskan 50 request dalam ~2 menit, jadi
+# recycle bisa membunuh job yang sedang diproses. 1000 request memberi
+# ruang yang cukup; container gratis ini juga mati sendiri bila idle.
+max_requests = int(os.environ.get("GUNICORN_MAX_REQUESTS", "1000"))
 max_requests_jitter = 10
