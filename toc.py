@@ -1746,17 +1746,36 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
         Dilewati bila paragraf isi berikutnya sudah punya
         page_break_before atau break halaman eksplisit (mis. judul
         BAB I) supaya tidak muncul halaman kosong. Paragraf kosong
-        dilewati saat melihat ke depan."""
+        dilewati saat melihat ke depan — KECUALI bila paragraf
+        kosong itu sendiri membawa break (run break halaman,
+        page_break_before, atau sectPr nextPage): dua break
+        berurutan = satu halaman kosong (UJI_COBA_2: paragraf
+        break + sectPr sumber sebelum BAB I sudah menjeda, jeda
+        tambahan dari mesin jadi halaman kosong). v0.6.27: dilewati
+        juga bila paragraf berikut adalah judul DAFTAR GAMBAR/TABEL
+        yang sudah ada di dokumen — judul itu mendapat
+        page_break_before di bagiannya sendiri, jadi jeda di sini
+        jadi halaman kosong."""
         idx = next((i for i, p in enumerate(doc.paragraphs)
                     if p._p is last_para._p), None)
         if idx is None:
             return True
         for nxt in doc.paragraphs[idx + 1:]:
-            if not nxt.text.strip():
-                continue
             if nxt.paragraph_format.page_break_before:
                 return False
-            return not _para_has_page_break(nxt)
+            if _para_has_page_break(nxt):
+                return False
+            _pPr = nxt._p.find(qn("w:pPr"))
+            _sect = (_pPr.find(qn("w:sectPr"))
+                     if _pPr is not None else None)
+            if _sect is not None and _sectPr_break_is_new_page(_sect):
+                return False
+            if not nxt.text.strip():
+                continue
+            if norm(nxt.text).upper() in ("DAFTAR GAMBAR",
+                                          "DAFTAR TABEL"):
+                return False
+            return True
         return True
 
     def _break_after(last_para):
@@ -1786,10 +1805,15 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
         # baru (anchor kini paragraf sebelum BAB I, jadi tanpa ini
         # judul menempel di akhir halaman depan).
         _page_break_before(toc_made[0])
-        br = doc.add_paragraph()
-        br.add_run().add_break(WD_BREAK.PAGE)
-        _insert_after(last_toc, br)
-        last_toc = br
+    # v0.6.27: jeda halaman setelah entri daftar isi TERAKHIR — dulu
+    # hanya di jalur tanpa heading DAFTAR ISI (v0.6.26); bila dokumen
+    # PUNYA heading itu, jeda tidak ada sehingga daftar isi yang
+    # pendek membuat judul BAB I (+ isi bab) mengalir ke halaman
+    # yang sama (makalah ppkn: 12 entri). Kini berlaku untuk SEMUA
+    # jalur; _needs_break_after melewatinya bila paragraf berikut
+    # sudah mulai di halaman baru atau berupa judul daftar berikut.
+    if _needs_break_after(last_toc):
+        last_toc = _break_after(last_toc)
     # v0.6.19: judul DAFTAR ISI jangan sampai terkurung sendirian di
     # satu halaman oleh section break nextPage (lihat
     # _relax_list_heading_break). Hanya bila heading itu dari dokumen
@@ -1823,12 +1847,16 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
         for e in gambar:
             g_made.append(add_entry(disp(e), e["page"], 0, False))
         last_anchor = insert_after_seq(g_anchor, g_made)
-        # v0.6.26: jeda halaman setelah entri Daftar Gambar terakhir
-        # bila tidak ada Daftar Tabel sesudahnya — tanpa ini isi bab
-        # mengalir ke halaman yang sama dengan daftar (cacat 22 Nov
-        # 2026). Dilewati bila paragraf berikutnya sudah mulai di
-        # halaman baru.
-        if not tabel and _needs_break_after(last_anchor):
+        # v0.6.27: jeda halaman setelah entri Daftar Gambar terakhir —
+        # dulu hanya bila tidak ada Daftar Tabel (v0.6.26 mengasumsikan
+        # urutan Gambar lalu Tabel); padahal urutan daftar mengikuti
+        # heading di dokumen — bila Daftar Tabel SUDAH ada sebelum
+        # Daftar Gambar (Gusti Ayu), judul BAB I menempel di halaman
+        # Daftar Gambar. Kini selalu dicek; _needs_break_after
+        # melewatinya bila paragraf berikut sudah mulai di halaman
+        # baru atau berupa judul Daftar Tabel yang memang dijeda
+        # sendiri.
+        if _needs_break_after(last_anchor):
             last_anchor = _break_after(last_anchor)
     else:
         # v0.6.18: daftar kosong tapi dokumen punya heading template
@@ -2597,7 +2625,20 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
             _cols = _csp.find(qn("w:cols"))
             if _cols is not None:
                 _csp.remove(_cols)
-            if _moved and _close_j + 1 < len(doc.paragraphs):
+            # v0.6.27: run break ini hanya bila TIDAK ada isi di antara
+            # judul BAB I dan sectPr penutup — bila ada (Gusti Ayu:
+            # sub-heading + 2 paragraf isi mengisi halaman judul),
+            # section break penutup itu sendiri sudah memisahkan isi
+            # lanjutannya ke halaman baru, dan run break tambahan
+            # justru membuat satu halaman kosong di antaranya. Run
+            # break hanya diperlukan bila section Arab baru hanya
+            # berisi judul (nifas): dua section break berurutan
+            # digabung LibreOffice sehingga isi naik ke halaman judul.
+            _has_content = any(
+                doc.paragraphs[_j].text.strip()
+                for _j in range(bab_j + 1, _close_j))
+            if (_moved and not _has_content
+                    and _close_j + 1 < len(doc.paragraphs)):
                 _nxt = doc.paragraphs[_close_j + 1]
                 _r = OxmlElement("w:r")
                 _br = OxmlElement("w:br")
