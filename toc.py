@@ -451,6 +451,214 @@ def _strip_prefix(text, lvl=None):
                   text or "")
 
 
+def _roman(n):
+    """1..3999 -> 'I'..'MMMCMXCIX'."""
+    out = ""
+    for v, s in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+                 (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+                 (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+        while n >= v:
+            out += s
+            n -= v
+    return out or "I"
+
+
+def _parse_roman(s):
+    """'VII' -> 7; None bila bukan Romawi 1..39 yang sah."""
+    vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    if not s or any(c not in vals for c in s):
+        return None
+    n = 0
+    for i, c in enumerate(s):
+        v = vals[c]
+        n += -v if i + 1 < len(s) and vals[s[i + 1]] > v else v
+    if 1 <= n <= 39 and _roman(n) == s:
+        return n
+    return None
+
+
+def _fmt_num(n, fmt):
+    """Penghitung -> teks sesuai format Word ('decimal','upperLetter',
+    'lowerLetter','upperRoman','lowerRoman')."""
+    if fmt == "upperLetter":
+        return chr(ord("A") + n - 1)
+    if fmt == "lowerLetter":
+        return chr(ord("a") + n - 1)
+    if fmt == "upperRoman":
+        return _roman(n)
+    if fmt == "lowerRoman":
+        return _roman(n).lower()
+    return str(n)
+
+
+def _load_numbering(docx_path):
+    """Baca word/numbering.xml: (abstract, nummap, overrides).
+    abstract = {id: {ilvl: (numFmt, lvlText, start)}};
+    nummap = {numId: abstractId}; overrides = {numId: {ilvl: start}}
+    dari <w:lvlOverride><w:startOverride>. {} bila tidak ada/gagal."""
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+        with zipfile.ZipFile(docx_path) as z:
+            raw = z.read("word/numbering.xml")
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        root = ET.fromstring(raw)
+        abstract = {}
+        for ab in root.findall("{%s}abstractNum" % w):
+            aid = ab.get("{%s}abstractNumId" % w)
+            lvls = {}
+            for lvl in ab.findall("{%s}lvl" % w):
+                il = lvl.get("{%s}ilvl" % w)
+                fmt = lvl.find("{%s}numFmt" % w)
+                txt = lvl.find("{%s}lvlText" % w)
+                st = lvl.find("{%s}start" % w)
+                lvls[int(il)] = (
+                    fmt.get("{%s}val" % w) if fmt is not None else None,
+                    txt.get("{%s}val" % w) if txt is not None else None,
+                    int(st.get("{%s}val" % w)) if st is not None else 1)
+            abstract[aid] = lvls
+        nummap = {}
+        overrides = {}
+        for num in root.findall("{%s}num" % w):
+            nid = num.get("{%s}numId" % w)
+            aid = num.find("{%s}abstractNumId" % w)
+            if aid is None:
+                continue
+            nummap[int(nid)] = aid.get("{%s}val" % w)
+            for ov in num.findall("{%s}lvlOverride" % w):
+                il = ov.get("{%s}ilvl" % w)
+                so = ov.find("{%s}startOverride" % w)
+                if il is not None and so is not None:
+                    overrides.setdefault(int(nid), {})[int(il)] = int(
+                        so.get("{%s}val" % w))
+        return abstract, nummap, overrides
+    except Exception:
+        return {}, {}, {}
+
+
+def _rendered_numbers(docx_path, paras):
+    """Simulasi penghitung list Word atas semua paragraf dokumen,
+    urut seperti di dokumen. Kembalikan {para_index: awalan nomor
+    seperti yang dirender Word} — mis. '1.1', 'A.', 'I.'.
+    Inilah yang dilihat pembaca di isi dokumen, jadi inilah yang
+    dipakai daftar isi; penghitung mesin (per level) tidak dipakai
+    karena satu level mesin bisa memakai banyak list Word yang
+    penghitungnya masing-masing. Aturan simulasi (model Word):
+    butir di level L memulai penghitung induknya yang belum mulai,
+    menaikkan penghitung levelnya sendiri, dan me-nol-kan level
+    yang lebih dalam. Paragraf di dalam tabel tidak ikut (mesin
+    tidak mengambil entri dari tabel); <w:lvl> penuh di dalam
+    lvlOverride tidak ditangani, hanya startOverride."""
+    abstract, nummap, overrides = _load_numbering(docx_path)
+    if not abstract:
+        return {}
+    counters = {}  # numId -> [None|int x9]
+    out = {}
+    for i, p in enumerate(paras):
+        ilvl = _ilvl(p)
+        numId = _numId(p)
+        if ilvl is None or numId is None:
+            continue
+        aid = nummap.get(numId)
+        if aid is None or aid not in abstract:
+            continue
+        lvls = abstract[aid]
+        if numId not in counters:
+            counters[numId] = [None] * 9
+        c = counters[numId]
+
+        def _start(j):
+            ov = overrides.get(numId, {}).get(j)
+            if ov is not None:
+                return ov
+            return lvls.get(j, (None, None, 1))[2]
+
+        for j in range(ilvl):
+            if c[j] is None:
+                c[j] = _start(j)
+        if c[ilvl] is None:
+            c[ilvl] = _start(ilvl)
+        else:
+            c[ilvl] += 1
+        for j in range(ilvl + 1, 9):
+            c[j] = None
+        fmt, lvl_text, _st = lvls.get(ilvl, (None, None, 1))
+        if not lvl_text or fmt == "bullet" or "%" not in lvl_text:
+            continue
+        rendered = lvl_text
+        for m in set(re.findall(r"%(\d+)", lvl_text)):
+            n = int(m)
+            f2 = lvls.get(n - 1, (None, None, 1))[0]
+            v = c[n - 1]
+            rendered = rendered.replace(
+                "%" + m, _fmt_num(v, f2) if v is not None else "?")
+        out[i] = rendered
+    return out
+
+
+def _literal_numstyle(text):
+    """Gaya penomoran dari awalan literal pada teks judul — hanya
+    untuk judul yang diketik manual tanpa penomoran Word (numPr).
+    Kembalikan ('dotted', jml_bagian) / ('single', format) / None."""
+    text = text or ""
+    m = re.match(r"(\d+(?:\.\d+)+)\.?\s", text)
+    if m:
+        return ("dotted", len(m.group(1).split(".")))
+    m = re.match(r"(X{0,3}(?:IX|IV|V?I{0,3}))\.\s", text)
+    if m and _parse_roman(m.group(1)) is not None:
+        return ("single", "upperRoman")
+    m = re.match(r"([A-Za-z])\.\s", text)
+    if m:
+        return ("single",
+                "upperLetter" if m.group(1).isupper() else "lowerLetter")
+    m = re.match(r"(\d+)\.\s", text)
+    if m:
+        return ("single", "decimal")
+    return None
+
+
+def _styled_display(style, lvl, bab_no, l1, l2, l3, d, base):
+    """Nomor tampilan mengikuti gaya dokumen sendiri, atau None bila
+    gaya tidak bisa dipakai (pemanggil memakai format contoh dosen).
+    Bertitik: 'BAB.penghitung' ('1.1', '5.2') — penghitungnya
+    berurutan per BAB mengikuti kedalaman titiknya, bukan level
+    mesin, supaya butir bertitik yang level mesinnya berbeda
+    ('Kesimpulan' lvl1 dan 'Saran' lvl2 di BAB V) tetap berurutan
+    5.1, 5.2 seperti di dokumen; tanpa titik di belakang angka
+    ('1.1 Latar Belakang', bukan '1.1.'). Satu token: penghitung
+    sendiri dalam formatnya ('I.', 'A.', 'a.', '1.')."""
+    if not style:
+        return None
+    kind, arg = style
+    if kind == "dotted":
+        if bab_no <= 0:
+            return None
+        k = min(arg, 4)
+        if k < 2:
+            return None
+        if any(p <= 0 for p in d[:k - 2]):
+            return None  # induk bertitik belum ada
+        d[k - 2] += 1
+        for j in range(k - 1, len(d)):
+            d[j] = 0
+        parts = [bab_no] + d[:k - 1]
+        return ".".join(str(p) for p in parts) + f" {base}"
+    n = (l1, l2, l3)[lvl - 1]
+    if arg == "decimal":
+        pre = f"{n}."
+    elif arg == "upperLetter":
+        pre = f"{chr(ord('A') + n - 1)}."
+    elif arg == "lowerLetter":
+        pre = f"{chr(ord('a') + n - 1)}."
+    elif arg == "upperRoman":
+        pre = f"{_roman(n)}."
+    elif arg == "lowerRoman":
+        pre = f"{_roman(n).lower()}."
+    else:
+        return None
+    return f"{pre} {base}"
+
+
 # ---------------------------------------------------------------- info paragraf
 def _ilvl(p):
     """Level list Word (numPr/ilvl) atau None bila tidak ada."""
@@ -548,6 +756,10 @@ def extract_structure(docx_path):
     paras = doc.paragraphs
     texts = [norm(p.text) for p in paras]
     known_terms = _known_terms(doc)
+    # v0.6.25: nomor yang dirender Word untuk tiap paragraf
+    # (simulasi penghitung list) + gaya dari awalan literal judul —
+    # dipakai add() sebelum _strip_prefix membuang awalan judul.
+    rendered = _rendered_numbers(docx_path, paras)
     entries = []
     consumed = set()
     seen_bab = False
@@ -624,7 +836,9 @@ def extract_structure(docx_path):
              "search": search if search is not None else [("text", text)],
              "post_anchor": post_anchor, "term": term,
              "ilvl": ilvl, "indent": indent, "numId": numId,
-             "lp_bold": lp_bold, "is_heading": is_heading}
+             "lp_bold": lp_bold, "is_heading": is_heading,
+             "numprefix": rendered.get(idx),
+             "numstyle": _literal_numstyle(text)}
         entries.append(e)
         push(e)
         return e
@@ -911,34 +1125,71 @@ def extract_structure(docx_path):
 
 
 def assign_display(entries):
-    """Isi e['display']: huruf/angka penomoran sesuai format contoh
-    dosen. Entri yang sudah berawalan dinomori ulang berurutan (hasil
-    sama bila dokumen sudah rapi); grup tanpa awalan (mis. 'Teori
-    Pelestarian') mendapat nomor; butir istilah+definisi hanya
-    menampilkan istilahnya; lampiran tampil apa adanya."""
+    """Isi e['display']: huruf/angka penomoran mengikuti gaya
+    penomoran dokumen sendiri (v0.6.25: nomor yang dirender Word di
+    isi dokumen — simulasi penghitung list; bila tidak ada, gaya
+    dari awalan literal judul — mis. '1.1' bertitik, 'I.' Romawi,
+    'A.' huruf); bila gaya tidak terdeteksi, pakai format contoh
+    dosen (A./1./a.). Entri yang sudah berawalan dinomori ulang
+    berurutan (hasil sama bila dokumen sudah rapi); grup tanpa
+    awalan (mis. 'Teori Pelestarian') mendapat nomor; butir
+    istilah+definisi hanya menampilkan istilahnya; lampiran tampil
+    apa adanya."""
     l1 = l2 = l3 = 0
+    bab_no = 0
+    # Penghitung entri bertitik per BAB: d[0] untuk 2 token ('1.1'),
+    # d[1] untuk 3 token ('1.1.1'), d[2] untuk 4 token.
+    d = [0, 0, 0]
     for e in entries:
         kind = e["kind"]
         lvl = e["level"]
         if kind in ("front", "bab", "pustaka", "lampiran"):
             if kind == "bab":
+                bab_no += 1
                 l1 = l2 = l3 = 0
+                d = [0, 0, 0]
             continue  # display sudah benar saat ekstraksi
         base = e.get("term") or _strip_prefix(e["text"])
+        # v0.6.25: nomor persis seperti yang dirender Word di isi
+        # dokumen ('1.1', 'A.', 'I.') — paling tepercaya; kalau
+        # tidak ada, gaya dari awalan literal, lalu format contoh
+        # dosen.
+        if e.get("numprefix"):
+            e["display"] = f"{e['numprefix']} {base}"
+            if lvl == 1:
+                l1 += 1
+                l2 = 0
+                l3 = 0
+            elif lvl == 2:
+                l2 += 1
+                l3 = 0
+            elif lvl == 3:
+                l3 += 1
+            else:
+                e["display"] = e["text"]
+            continue
         if lvl == 1:
             l1 += 1
             l2 = 0
             l3 = 0
-            e["display"] = f"{chr(ord('A') + l1 - 1)}. {base}"
         elif lvl == 2:
             l2 += 1
             l3 = 0
-            e["display"] = f"{l2}. {base}"
         elif lvl == 3:
             l3 += 1
-            e["display"] = f"{chr(ord('a') + l3 - 1)}. {base}"
         else:
             e["display"] = e["text"]
+            continue
+        shown = _styled_display(e.get("numstyle"), lvl, bab_no,
+                                l1, l2, l3, d, base)
+        if shown is not None:
+            e["display"] = shown
+        elif lvl == 1:
+            e["display"] = f"{chr(ord('A') + l1 - 1)}. {base}"
+        elif lvl == 2:
+            e["display"] = f"{l2}. {base}"
+        else:
+            e["display"] = f"{chr(ord('a') + l3 - 1)}. {base}"
     return entries
 
 
@@ -1165,6 +1416,10 @@ def format_toc_text(entries, width=78):
 # ---------------------------------------------------------------- sisip ke docx
 def _insert_after(ref_para, new_para):
     ref_para._p.addnext(new_para._p)
+
+
+def _insert_before(ref_para, new_para):
+    ref_para._p.addprevious(new_para._p)
 
 
 def _page_break_before(p):
@@ -1399,11 +1654,24 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
     if toc_para is not None:
         anchor = toc_para
         insert_before_bab = False
+        insert_before = None
     else:
         bab_idx = next((i for i, p in enumerate(paras)
                         if RE_BAB.match(norm(p.text))), None)
-        anchor = paras[bab_idx] if bab_idx is not None else paras[-1]
         insert_before_bab = True
+        # v0.6.26: daftar isi diletakkan SEBELUM judul BAB I, bukan
+        # sesudahnya (cacat 22 Nov 2026: dokumen tanpa heading
+        # "DAFTAR ISI" membuat daftar isi muncul tepat setelah judul
+        # BAB I, dan isi bab menempel di halaman Daftar Tabel).
+        if bab_idx is None:
+            anchor = paras[-1]
+            insert_before = None
+        elif bab_idx > 0:
+            anchor = paras[bab_idx - 1]
+            insert_before = None
+        else:  # BAB I paragraf pertama dokumen
+            anchor = None
+            insert_before = paras[0]
 
     def _indent_for_level(level):
         if old_fmt is None:
@@ -1463,6 +1731,42 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
             cursor = p
         return cursor
 
+    def insert_before_seq(ref_para, new_paras):
+        """Sisipkan new_paras berurutan sebelum ref_para (v0.6.26).
+        Kembalikan paragraf terakhir yang disisipkan."""
+        cursor = ref_para
+        for p in reversed(new_paras):
+            _insert_before(cursor, p)
+            cursor = p
+        return new_paras[-1]
+
+    def _needs_break_after(last_para):
+        """True bila halaman harus dijeda setelah last_para: paragraf
+        isi berikutnya belum tentu mulai di halaman baru (v0.6.26).
+        Dilewati bila paragraf isi berikutnya sudah punya
+        page_break_before atau break halaman eksplisit (mis. judul
+        BAB I) supaya tidak muncul halaman kosong. Paragraf kosong
+        dilewati saat melihat ke depan."""
+        idx = next((i for i, p in enumerate(doc.paragraphs)
+                    if p._p is last_para._p), None)
+        if idx is None:
+            return True
+        for nxt in doc.paragraphs[idx + 1:]:
+            if not nxt.text.strip():
+                continue
+            if nxt.paragraph_format.page_break_before:
+                return False
+            return not _para_has_page_break(nxt)
+        return True
+
+    def _break_after(last_para):
+        """Sisipkan jeda halaman setelah last_para, kembalikan
+        paragraf jeda itu (v0.6.26)."""
+        br = doc.add_paragraph()
+        br.add_run().add_break(WD_BREAK.PAGE)
+        _insert_after(last_para, br)
+        return br
+
     def disp(e):
         return e.get("display") or e["text"]
 
@@ -1473,8 +1777,15 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
     for e in entries:
         toc_made.append(add_entry(disp(e), e["page"], e["level"],
                                   e["bold"]))
-    last_toc = insert_after_seq(anchor, toc_made)
+    if insert_before is not None:
+        last_toc = insert_before_seq(insert_before, toc_made)
+    else:
+        last_toc = insert_after_seq(anchor, toc_made)
     if insert_before_bab:
+        # v0.6.26: judul DAFTAR ISI yang baru dibuat mulai di halaman
+        # baru (anchor kini paragraf sebelum BAB I, jadi tanpa ini
+        # judul menempel di akhir halaman depan).
+        _page_break_before(toc_made[0])
         br = doc.add_paragraph()
         br.add_run().add_break(WD_BREAK.PAGE)
         _insert_after(last_toc, br)
@@ -1512,6 +1823,13 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
         for e in gambar:
             g_made.append(add_entry(disp(e), e["page"], 0, False))
         last_anchor = insert_after_seq(g_anchor, g_made)
+        # v0.6.26: jeda halaman setelah entri Daftar Gambar terakhir
+        # bila tidak ada Daftar Tabel sesudahnya — tanpa ini isi bab
+        # mengalir ke halaman yang sama dengan daftar (cacat 22 Nov
+        # 2026). Dilewati bila paragraf berikutnya sudah mulai di
+        # halaman baru.
+        if not tabel and _needs_break_after(last_anchor):
+            last_anchor = _break_after(last_anchor)
     else:
         # v0.6.18: daftar kosong tapi dokumen punya heading template
         # ("DAFTAR GAMBAR" tanpa entri) — tetap mulai di lembar baru
@@ -1537,7 +1855,11 @@ def build_output_docx(src_path, entries, out_path, gambar=None, tabel=None,
             _relax_list_heading_break(t_head, doc)
         for e in tabel:
             t_made.append(add_entry(disp(e), e["page"], 0, False))
-        insert_after_seq(t_anchor, t_made)
+        last_t = insert_after_seq(t_anchor, t_made)
+        # v0.6.26: sama seperti Daftar Gambar di atas — jeda halaman
+        # setelah entri Daftar Tabel terakhir.
+        if _needs_break_after(last_t):
+            _break_after(last_t)
     else:
         # v0.6.18: sama seperti daftar gambar di atas.
         t_head = find_heading("DAFTAR TABEL")
@@ -2716,6 +3038,19 @@ def check_document(docx_path, entries, gambar, tabel, mismatches):
                             "angka Romawi (BAB I) dan ada yang Arab (BAB 1). "
                             "Samakan semuanya.")})
     # --- 2. penomoran sub-bab (hanya awalan angka, mis. 1.1 / 1.1.1) ---
+    # v0.6.25: nomor BAB yang ada (Romawi/Arab) — induk satu angka
+    # pada nomor bertitik ('1' dari '1.1') adalah BAB itu sendiri.
+    bab_nums = set()
+    for _b in entries:
+        if _b.get("kind") == "bab":
+            _m = re.match(r"(?i)^BAB\s+([IVXLCDM]+|\d+)\b",
+                          (_b.get("display") or _b.get("text") or ""))
+            if _m:
+                _v = _parse_roman(_m.group(1).upper()) \
+                    if re.fullmatch(r"[IVXLCDM]+", _m.group(1).upper()) \
+                    else int(_m.group(1))
+                if _v:
+                    bab_nums.add(_v)
     seen = {}  # parent -> set(last)
     parents = set()
     for e in entries:
@@ -2741,7 +3076,11 @@ def check_document(docx_path, entries, gambar, tabel, mismatches):
                 "message": (f"Penomoran sub-bab di bawah {parent} loncat: "
                             f"ada {', '.join(str(n) for n in ordered)} "
                             f"(seharusnya berurutan).")})
-        if parent not in parents:
+        # v0.6.25: induk satu angka ('1' dari '1.1') adalah nomor BAB
+        # itu sendiri, bukan heading yang hilang — jangan peringatkan
+        # bila BAB bernomor itu memang ada.
+        if parent not in parents and not (
+                parent.isdigit() and int(parent) in bab_nums):
             warnings.append({
                 "code": "num_gap",
                 "message": (f"Sub-bab {parent}.* muncul tanpa induk "
