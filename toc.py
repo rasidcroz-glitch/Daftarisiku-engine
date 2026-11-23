@@ -2465,7 +2465,8 @@ def _section_starts_new_page(section, prev_section):
 
 def add_footer_page_numbers(out_path, entries, bab_new_page=None,
                             bab_new_pages=None,
-                            force_bab1_page_break=False):
+                            force_bab1_page_break=False,
+                            body_align="right"):
     """Tambahkan nomor halaman di footer dokumen hasil.
     bab_new_page: True bila BAB I mulai di halaman baru (diisi dari
     PDF hasil oleh process(); bila None, ditebak dari sinyal .docx).
@@ -2479,9 +2480,15 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     dobel). Dipakai HANYA oleh retry di process() bila judul BAB I
     menempel di bawah daftar isi. Gusti (judul di tengah halaman
     isi) tidak tersentuh karena retry-nya tidak memicu di sana.
+    body_align (v0.6.32): posisi nomor halaman ISI selain halaman
+    pertama BAB — "right" (default, sama seperti dulu), "center",
+    atau "left". Halaman depan tetap Romawi TENGAH dan halaman
+    pertama tiap BAB tetap TENGAH (aturan final user) — hanya
+    nomor isi biasa yang mengikuti pilihan ini.
     Halaman pertama tiap BAB memakai footer first-page (titlePg)
     dengan field PAGE rata tengah di bawah; halaman lain tetap
-    Romawi tengah (halaman depan) atau Arab kanan (isi).
+    Romawi tengah (halaman depan) atau Arab di posisi body_align
+    (isi).
     PENTING (v0.6.10): TIDAK ada section break baru dan TIDAK ada
     perubahan tipe break. Section break nextPage sebelum BAB
     terbukti merusak pagination di LibreOffice untuk dokumen ini
@@ -2522,6 +2529,12 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     antar render LibreOffice.
     Kembalikan True bila batas BAB I ditemukan (Romawi -> Arab)."""
     doc = Document(out_path)
+    # v0.6.32: posisi nomor halaman isi (bukan halaman pertama BAB).
+    body_align_enum = {"right": WD_ALIGN_PARAGRAPH.RIGHT,
+                       "center": WD_ALIGN_PARAGRAPH.CENTER,
+                       "left": WD_ALIGN_PARAGRAPH.LEFT}.get(
+                           (body_align or "right").lower(),
+                           WD_ALIGN_PARAGRAPH.RIGHT)
     # Cari paragraf judul tiap BAB (kenal judul telanjang "BAB I" yang
     # judulnya di baris berikut; baris daftar isi mengandung tab+nomor
     # sehingga tidak cocok persis — itu yang diinginkan).
@@ -2803,7 +2816,7 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         even_odd = False
     for i, s in enumerate(doc.sections):
         align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
-                 else WD_ALIGN_PARAGRAPH.RIGHT)
+                 else body_align_enum)
         _ensure_section_footers(s, align, i == 0, even_odd)
     # --- cover dulu, SEBELUM footer tengah BAB ---
     # (v0.6.10) Urutan penting: first-page footer cover harus
@@ -2926,7 +2939,7 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         if i in _cont_secs:
             continue
         _align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
-                  else WD_ALIGN_PARAGRAPH.RIGHT)
+                  else body_align_enum)
         _ensure_footer_number_on(s.footer, _align)
     # Hapus titlePg LIAR dari section lain (kecuali cover sec 0):
     # titlePg warisan sumber pada section yang paragraf pertamanya
@@ -3288,10 +3301,14 @@ def _strip_external_rels(docx_path):
     return dropped
 
 
-def process(docx_path, work_dir, include_lists=True):
+def process(docx_path, work_dir, include_lists=True, body_align="right"):
     """Pipeline lengkap. Kembalikan dict laporan + path hasil.
     include_lists=False: DAFTAR GAMBAR / DAFTAR TABEL tidak dibuat
-    (daftar isi tetap jalan seperti biasa)."""
+    (daftar isi tetap jalan seperti biasa).
+    body_align (v0.6.32): posisi nomor halaman isi — "right"
+    (default), "center", atau "left"; diteruskan ke semua
+    pemanggilan add_footer_page_numbers. Nilai di luar itu
+    dianggap "right"."""
     os.makedirs(work_dir, exist_ok=True)
     # v0.6.31: tolak zip bomb SEBELUM parse apa pun.
     _check_decompressed_size(docx_path)
@@ -3428,7 +3445,8 @@ def process(docx_path, work_dir, include_lists=True):
     shutil.copy(out_docx, pre_footer)
     footer_ok = add_footer_page_numbers(out_docx, entries,
                                         bab_new_page=bab_new_page,
-                                        bab_new_pages=bab_new_pages)
+                                        bab_new_pages=bab_new_pages,
+                                        body_align=body_align)
 
     # --- v0.6.13: verifikasi footer BAB I dari RENDER AKHIR ---
     # Pengaman v0.6.11 (bab_new_page dari PDF pra-footer) bisa salah:
@@ -3492,7 +3510,8 @@ def process(docx_path, work_dir, include_lists=True):
             add_footer_page_numbers(out_docx, entries,
                                     bab_new_page=True,
                                     bab_new_pages=forced_pages,
-                                    force_bab1_page_break=True)
+                                    force_bab1_page_break=True,
+                                    body_align=body_align)
             akhir2 = os.path.join(work_dir, "_akhir2.docx")
             shutil.copy(out_docx, akhir2)
             pdf2 = render_pdf(akhir2, work_dir)
@@ -3512,7 +3531,8 @@ def process(docx_path, work_dir, include_lists=True):
                 add_footer_page_numbers(out_docx, entries,
                                         bab_new_page=True,
                                         bab_new_pages=forced_pages,
-                                        force_bab1_page_break=True)
+                                        force_bab1_page_break=True,
+                                        body_align=body_align)
                 akhir3 = os.path.join(work_dir, "_akhir3.docx")
                 shutil.copy(out_docx, akhir3)
                 pdf3 = render_pdf(akhir3, work_dir)
@@ -3567,7 +3587,8 @@ def process(docx_path, work_dir, include_lists=True):
                 out_docx, entries,
                 bab_new_page=True if footer_forced else bab_new_page,
                 bab_new_pages=_pages4,
-                force_bab1_page_break=footer_forced)
+                force_bab1_page_break=footer_forced,
+                body_align=body_align)
             _akhir4 = os.path.join(work_dir, "_akhir4.docx")
             shutil.copy(out_docx, _akhir4)
             _pdf4 = render_pdf(_akhir4, work_dir)
