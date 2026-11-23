@@ -3244,11 +3244,57 @@ def check_document(docx_path, entries, gambar, tabel, mismatches):
     return warnings
 
 
+# v0.6.31: batas dekompresi (anti zip/XML bomb, T-2) + strip relasi
+# eksternal (anti SSRF LibreOffice, S-2).
+MAX_DECOMPRESSED_TOTAL = 100 * 1024 * 1024  # 100 MB total isi .docx
+MAX_DECOMPRESSED_FILE = 50 * 1024 * 1024    # 50 MB per satu file
+
+
+def _check_decompressed_size(docx_path):
+    """Tolak .docx yang mengembang terlalu besar (zip bomb).
+    Dipanggil di awal process(), SEBELUM parse apa pun: jumlahkan
+    ZipInfo.file_size semua isi. Pesan hanya sampai ke log server
+    (ke pelanggan hanya pesan umum, aturan v0.6.30)."""
+    import zipfile
+    total = 0
+    with zipfile.ZipFile(docx_path) as z:
+        for info in z.infolist():
+            if info.file_size > MAX_DECOMPRESSED_FILE:
+                raise ValueError(
+                    f"isi dokumen terlalu besar: {info.filename} "
+                    f"({info.file_size // (1024 * 1024)} MB)")
+            total += info.file_size
+            if total > MAX_DECOMPRESSED_TOTAL:
+                raise ValueError(
+                    "dokumen mengembang terlalu besar setelah dibuka "
+                    "(lebih dari 100 MB)")
+
+
+def _strip_external_rels(docx_path):
+    """Hapus relasi eksternal (TargetMode=External) dari SEMUA part
+    .docx — linked image, INCLUDEPICTURE, dsb. — supaya LibreOffice
+    tidak pernah GET ke URL penyerang saat me-render (S-2).
+    Kembalikan jumlah rel yang dihapus; 0 = tidak ada perubahan
+    dan file tidak ditulis ulang."""
+    doc = Document(docx_path)
+    dropped = 0
+    for part in doc.part.package.iter_parts():
+        for rId, rel in list(part.rels.items()):
+            if rel.is_external:
+                part.drop_rel(rId)
+                dropped += 1
+    if dropped:
+        doc.save(docx_path)
+    return dropped
+
+
 def process(docx_path, work_dir, include_lists=True):
     """Pipeline lengkap. Kembalikan dict laporan + path hasil.
     include_lists=False: DAFTAR GAMBAR / DAFTAR TABEL tidak dibuat
     (daftar isi tetap jalan seperti biasa)."""
     os.makedirs(work_dir, exist_ok=True)
+    # v0.6.31: tolak zip bomb SEBELUM parse apa pun.
+    _check_decompressed_size(docx_path)
     entries = extract_structure(docx_path)
     assign_display(entries)
     if not entries:
@@ -3272,6 +3318,8 @@ def process(docx_path, work_dir, include_lists=True):
     del _clean
     gc.collect()
     _trim_memory()
+    # v0.6.31: buang rel eksternal dari salinan sebelum di-render.
+    _strip_external_rels(clean_path)
     pdf_in = render_pdf(clean_path, work_dir)
     pages_in = pdf_pages_text(pdf_in)
     total_in = len(pages_in)
@@ -3301,6 +3349,8 @@ def process(docx_path, work_dir, include_lists=True):
     build_output_docx(docx_path, entries, out_docx,
                       gambar=gambar, tabel=tabel,
                       normalize_pre_bab=normalize_pre_bab)
+    # v0.6.31: buang rel eksternal dari hasil sebelum di-render.
+    _strip_external_rels(out_docx)
 
     # --- verifikasi: nomor Arab relatif terhadap BAB I, jadi penyisipan
     # TOC sebelum BAB I TIDAK mengubah nomor (BAB I dan semua heading
