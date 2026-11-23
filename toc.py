@@ -212,6 +212,13 @@ RE_LOWER = re.compile(r"^([a-z])\.\s+\S")
 # antar angka kini [.\s]+, bukan satu karakter).
 RE_CAPTION = re.compile(r"^(Gambar|Tabel)\s+(\d+(?:[.\s]+\d+)*)\s+\S",
                          re.IGNORECASE)
+# Caption terbelah 2 paragraf (v0.6.29): "Gambar 1.1" di satu
+# paragraf, deskripsinya di paragraf berikut (HEAD); atau "Gambar"
+# saja lalu "1.1 ..." di paragraf berikut (BARE + NUM).
+RE_CAPTION_HEAD = re.compile(r"^(Gambar|Tabel)\s+(\d+(?:[.\s]+\d+)*)\s*$",
+                             re.IGNORECASE)
+RE_CAPTION_BARE = re.compile(r"^(Gambar|Tabel)\s*$", re.IGNORECASE)
+RE_CAPTION_NUM = re.compile(r"^(\d+(?:[.\s]+\d+)*)\s+\S", re.IGNORECASE)
 RE_LAMPIRAN = re.compile(r"^LAMPIRAN\s+\d+\b", re.IGNORECASE)
 # Baris daftar isi LAMA (v0.6.1): "BAB I\t1", "1. Rumusan Masalah\t7",
 # "HALAMAN PERSETUJUAN PEMBIMBING\tii" — teks diakhiri tab / titik-titik /
@@ -1193,6 +1200,44 @@ def assign_display(entries):
     return entries
 
 
+def _split_caption_tail(paras, i, num_start=False):
+    """Paragraf lanjutan caption yang terbelah 2 paragraf (v0.6.29).
+    Kembalikan (indeks, teks_norm) atau None. Satu paragraf kosong
+    di antaranya boleh dilewati. Lanjutan harus teks biasa yang
+    pendek (<=120 karakter) tanpa titik di akhir — frasa deskripsi,
+    bukan kalimat isi — dan bukan heading, baris daftar lama,
+    caption lain, judul BAB/sub-bab, atau judul halaman depan,
+    supaya label caption yang berdiri sendiri tidak salah gabung
+    dengan isi berikutnya. num_start=True: lanjutan harus diawali
+    nomor + teks ('1.1 ...'), untuk bentuk 'Gambar' saja di
+    paragraf kepala."""
+    j = i + 1
+    if j < len(paras) and not norm(paras[j].text):
+        j += 1
+    if j >= len(paras):
+        return None
+    q = paras[j]
+    t = norm(q.text)
+    if not t or _is_old_toc_line(q):
+        return None
+    if q.style.name in ("Heading 1", "Heading 2", "Heading 3"):
+        return None
+    if (RE_CAPTION.match(t) or RE_CAPTION_HEAD.match(t)
+            or RE_CAPTION_BARE.match(t) or RE_BAB.match(t)):
+        return None
+    if t.upper().replace(" ", "") in FRONT_BY_NOSPACE:
+        return None
+    if num_start:
+        if not RE_CAPTION_NUM.match(t):
+            return None
+    elif (RE_LETTER.match(t) or RE_NUMBER.match(t)
+            or RE_LOWER.match(t)):
+        return None
+    if len(t) > 120 or t.endswith("."):
+        return None
+    return j, t
+
+
 def extract_captions(docx_path):
     """Kembalikan (gambar, tabel): entri caption dari paragraf dokumen,
     dalam urutan kemunculan. Hanya pola standar yang terdeteksi
@@ -1201,6 +1246,13 @@ def extract_captions(docx_path):
     tidak terdeteksi. kind 'caption' -> nomor halaman Arab relatif
     terhadap BAB I, sama seperti heading isi.
 
+    Caption terbelah 2 paragraf (v0.6.29) ikut terdeteksi: 'Gambar
+    1.1' di satu paragraf + deskripsi di paragraf berikut, atau
+    'Gambar' saja + '1.1 ...' di paragraf berikut. Teks gabungan
+    dipakai sebagai entri (untuk cari halaman di PDF, pencocokan
+    tanpa spasi sudah menangani baris yang terbelah); isi dokumen
+    TIDAK diubah.
+
     Normalisasi tampilan (v0.4.0): pemisah spasi pada nomor
     ('Gambar 2 1 ...', 'Gambar 2. 1 ...') ditampilkan sebagai titik
     ('Gambar 2.1 ...'). Isi dokumen TIDAK diubah; 'text' tetap apa
@@ -1208,24 +1260,58 @@ def extract_captions(docx_path):
     ternormalisasi untuk daftar."""
     doc = Document(docx_path)
     gambar, tabel = [], []
-    for i, p in enumerate(doc.paragraphs):
+    paras = doc.paragraphs
+    i = 0
+    while i < len(paras):
+        p = paras[i]
         text = norm(p.text)
         if _is_old_toc_line(p):
             # v0.6.1: baris daftar gambar/tabel LAMA ("Gambar 1.1 ...\t5")
             # bukan caption asli — abaikan supaya tidak jadi entri duplikat.
+            i += 1
             continue
         m = RE_CAPTION.match(text)
-        if not m:
+        if m:
+            kind = m.group(1)
+            num = ".".join(re.split(r"[.\s]+", m.group(2)))
+            rest = text[m.end(2):].strip()
+            display = f"{kind} {num} {rest}"
+            entry = {"text": text, "level": 0, "kind": "caption",
+                     "list": kind.lower(), "para_index": i, "bold": False,
+                     "display": display, "post_anchor": False,
+                     "search": [("text", text)]}
+            (gambar if kind.lower() == "gambar" else tabel).append(entry)
+            i += 1
             continue
-        kind = m.group(1)
-        num = ".".join(re.split(r"[.\s]+", m.group(2)))
-        rest = text[m.end(2):].strip()
-        display = f"{kind} {num} {rest}"
-        entry = {"text": text, "level": 0, "kind": "caption",
-                 "list": kind.lower(), "para_index": i, "bold": False,
-                 "display": display, "post_anchor": False,
-                 "search": [("text", text)]}
-        (gambar if kind.lower() == "gambar" else tabel).append(entry)
+        # v0.6.29: caption terbelah 2 paragraf.
+        merged = None
+        mh = RE_CAPTION_HEAD.match(text)
+        if mh:
+            tail = _split_caption_tail(paras, i)
+            if tail:
+                j, rest = tail
+                merged = (mh.group(1), mh.group(2), rest, j)
+        else:
+            mb = RE_CAPTION_BARE.match(text)
+            if mb:
+                tail = _split_caption_tail(paras, i, num_start=True)
+                if tail:
+                    j, rest = tail
+                    mn = RE_CAPTION_NUM.match(rest)
+                    merged = (mb.group(1), mn.group(1),
+                              rest[mn.end(1):].strip(), j)
+        if merged:
+            kind, num, rest, j = merged
+            num = ".".join(re.split(r"[.\s]+", num))
+            full = f"{kind} {num} {rest}"
+            entry = {"text": full, "level": 0, "kind": "caption",
+                     "list": kind.lower(), "para_index": i, "bold": False,
+                     "display": full, "post_anchor": False,
+                     "search": [("text", full)]}
+            (gambar if kind.lower() == "gambar" else tabel).append(entry)
+            i = j + 1
+            continue
+        i += 1
     return gambar, tabel
 
 
