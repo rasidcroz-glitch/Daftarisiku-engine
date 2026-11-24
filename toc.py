@@ -2858,28 +2858,40 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
                     _bpPr.remove(_bsp)
                     _ppPr.append(_bsp)
                     if _added_1sec:
-                        # v0.6.35: ubah sectPr pindahan jadi nextPage.
+                        # v0.6.36: ubah sectPr pindahan jadi nextPage.
                         # LibreOffice MENGABAIKAN pgNumType
                         # (lowerRoman) pada section yang ditutup
                         # break continuous — footer depan tetap Arab
                         # ("2","3") — tapi menerapkannya pada break
                         # nextPage (dibuktikan eksperimen minimal:
                         # continuous -> angka Arab, nextPage -> "ii").
-                        # Break-nya tetap TEPAT SATU: nextPage ini
-                        # MENGGANTIKAN satu break eksplisit yang
-                        # sudah ada — run break yang baru dibuang,
-                        # atau pageBreakBefore judul (dihapus).
-                        # Bila tidak ada break eksplisit (BAB I
-                        # kebetulan di halaman baru), biarkan
-                        # continuous supaya pagination tidak berubah
-                        # (depan tetap Arab — batasan).
+                        # v0.6.35 hanya mengubah ke nextPage bila
+                        # ada break eksplisit (_stripped /
+                        # pageBreakBefore); SKRIPSI ACA gagal karena
+                        # BAB I-nya mulai di halaman baru HANYA
+                        # karena aliran pagination (tanpa break
+                        # eksplisit), sehingga sectPr pindahan tetap
+                        # continuous dan footer depan tetap Arab
+                        # "2"–"7" walau label TOC sudah Romawi.
+                        # bab_new_page di sini terverifikasi PDF
+                        # oleh process() (BAB I baris isi pertama
+                        # halamannya di render pra-footer), jadi
+                        # break nextPage sebelum judul bersifat
+                        # netral pagination — BAB I sudah di puncak
+                        # halaman baru — dan LibreOffice menerapkan
+                        # lowerRoman. Fallback continuous hanya bila
+                        # BAB I tidak terverifikasi mulai di halaman
+                        # baru (cabang else di bawah; tidak terjangkau
+                        # bila gate _moved sudah mensyaratkan
+                        # bab_new_page True — dipertahankan defensif).
                         _mt = _bsp.find(qn("w:type"))
                         if _mt is None:
                             _mt = OxmlElement("w:type")
                             _bsp.insert(0, _mt)
                         if (_stripped
                                 or bab_para.paragraph_format
-                                .page_break_before):
+                                .page_break_before
+                                or bab_new_page):
                             _mt.set(qn("w:val"), "nextPage")
                             bab_para.paragraph_format.\
                                 page_break_before = None
