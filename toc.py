@@ -2417,6 +2417,159 @@ def _ensure_footer_number_on(footer, align):
     _add_page_field_para(target, align)
 
 
+def _hdrftr_effective_part(hf):
+    """Part header/footer yang berlaku untuk section ini (milik
+    sendiri atau warisan dari section sebelumnya), atau None bila
+    tidak ada definisi di rantai section. TIDAK membuat part baru
+    — mengakses hf.part / hf._element akan membuat part baru bila
+    section pertama belum punya definisi (kasus 3 python-docx)."""
+    cur = hf
+    while cur is not None:
+        if cur._has_definition:
+            return cur._definition
+        cur = cur._prior_headerfooter
+    return None
+
+
+def _strip_page_fields_from_header_footer(hf, ensure_explicit=False):
+    """Buang semua field PAGE dari satu header/footer (teks lain
+    dipertahankan). Dipakai v0.6.33 untuk posisi 'Kanan atas':
+    nomor halaman isi pindah ke header, jadi footer isi (dan header
+    halaman depan / halaman pertama BAB) tidak boleh lagi membawa
+    field PAGE. Bila header/footer tertaut ke sebelumnya, tautan
+    diputus dulu supaya part bersama section lain tidak ikut
+    berubah — teks non-nomor disalin kembali seperti di
+    _ensure_footer_number_on.
+    v0.6.33-perbaikan: bila part yang berlaku TIDAK punya field
+    PAGE, jangan sentuh apa pun — memutuskan tautan (membuat part
+    + referensi baru) membuat LibreOffice mengabaikan pgNumType
+    lowerRoman section itu, sehingga nomor Romawi halaman depan
+    tampil sebagai Arab (nifas: vi/vii jadi 6/7).
+    ensure_explicit=True (hanya untuk first-page header section
+    isi): part HARUS eksplisit meski tidak ada field yang dibuang
+    — tanpa referensi 'first', halaman pertama BAB memakai header
+    default (nomor kanan atas) sehingga nomor jadi ganda (atas +
+    tengah bawah)."""
+    part = _hdrftr_effective_part(hf)
+    if part is None:
+        if ensure_explicit and hf.is_linked_to_previous:
+            hf.is_linked_to_previous = False
+        return
+    has_field = any(_para_el_has_page_field(el)
+                    for el in part._element.iter(qn("w:p")))
+    if not has_field and not ensure_explicit:
+        return
+    if hf.is_linked_to_previous:
+        old_texts = [q.text for q in hf.paragraphs
+                     if q.text.strip()
+                     and not _para_has_page_field(q)]
+        hf.is_linked_to_previous = False
+        for t in old_texts:
+            hf.add_paragraph(t)
+        return
+    if has_field:
+        for el in list(hf._element.iter(qn("w:p"))):
+            if _para_el_has_page_field(el):
+                _strip_page_field_el(el)
+
+
+def _ensure_header_number_on(header, align):
+    """Cermin _ensure_footer_number_on untuk header: pastikan satu
+    header punya tepat satu field PAGE dengan posisi align.
+    v0.6.33: dipakai untuk posisi 'Kanan atas' (header kanan atas)."""
+    want = {WD_ALIGN_PARAGRAPH.CENTER: "center",
+            WD_ALIGN_PARAGRAPH.RIGHT: "right",
+            WD_ALIGN_PARAGRAPH.LEFT: "left"}.get(align)
+    # 1. Cari field PAGE di mana pun di xml header ini.
+    field_paras = [el for el in header._element.iter(qn("w:p"))
+                   if _para_el_has_page_field(el)]
+    if field_paras and _para_el_alignment(field_paras[0]) == want:
+        # Posisi sudah benar — buang field tambahan bila ada, selesai.
+        for extra in field_paras[1:]:
+            _strip_page_field_el(extra)
+        return
+    # 2. Perlu diubah/tambah: bila tertaut ke sebelumnya, putuskan
+    # dulu supaya hanya header ini yang berubah.
+    if header.is_linked_to_previous:
+        old_texts = [q.text for q in header.paragraphs
+                     if q.text.strip()
+                     and not _para_has_page_field(q)]
+        header.is_linked_to_previous = False
+        for t in old_texts:
+            header.add_paragraph(t)
+    else:
+        # Bukan tertaut: buang semua field lama yang ada di header ini.
+        for el in field_paras:
+            _strip_page_field_el(el)
+    # 3. Tambah tepat satu field PAGE dengan posisi benar.
+    target = next((p for p in header.paragraphs
+                   if not p.text.strip()), None)
+    if target is None:
+        target = header.add_paragraph()
+    _add_page_field_para(target, align)
+
+
+def _ensure_section_headers_top_right(section, even_odd):
+    """Header section isi untuk posisi 'Kanan atas': field PAGE
+    rata kanan di header default (+ genap bila dokumen memakai
+    odd/even). Header first-page dikosongkan dari field PAGE bila
+    sudah dipakai (halaman pertama BAB tidak boleh punya nomor
+    atas — nomornya tetap tengah bawah lewat first-page footer)."""
+    _ensure_header_number_on(section.header, WD_ALIGN_PARAGRAPH.RIGHT)
+    if even_odd:
+        try:
+            _ensure_header_number_on(section.even_page_header,
+                                     WD_ALIGN_PARAGRAPH.RIGHT)
+        except Exception:
+            pass
+    if section.different_first_page_header_footer:
+        try:
+            # Part first-header HARUS eksplisit (kosong): tanpa
+            # referensi 'first', halaman pertama BAB memakai header
+            # default (nomor kanan atas) sehingga nomor jadi ganda
+            # (atas + tengah bawah).
+            _strip_page_fields_from_header_footer(
+                section.first_page_header, ensure_explicit=True)
+        except Exception:
+            pass
+
+
+def _strip_section_headers(section, even_odd):
+    """Buang field PAGE dari semua header section ini (default,
+    genap, first-page bila dipakai). Dipakai v0.6.33 untuk halaman
+    depan saat posisi 'Kanan atas': halaman depan hanya boleh
+    menampilkan nomor Romawi tengah bawah."""
+    _strip_page_fields_from_header_footer(section.header)
+    if even_odd:
+        try:
+            _strip_page_fields_from_header_footer(
+                section.even_page_header)
+        except Exception:
+            pass
+    if section.different_first_page_header_footer:
+        try:
+            _strip_page_fields_from_header_footer(
+                section.first_page_header)
+        except Exception:
+            pass
+
+
+def _strip_section_footers(section, even_odd):
+    """Buang field PAGE dari footer default (+ genap) section ini.
+    Dipakai v0.6.33 untuk section isi saat posisi 'Kanan atas':
+    nomor pindah ke header, footer isi harus kosong dari nomor.
+    First-page footer TIDAK disentuh di sini — halaman pertama BAB
+    tetap ditangani _ensure_bab_first_page_footer / penghapusan
+    titlePg liar."""
+    _strip_page_fields_from_header_footer(section.footer)
+    if even_odd:
+        try:
+            _strip_page_fields_from_header_footer(
+                section.even_page_footer)
+        except Exception:
+            pass
+
+
 def _ensure_section_footers(section, align, is_first, even_odd):
     """Nomor di semua jenis footer section ini: default, genap (bila
     dokumen memakai odd/even), dan halaman pertama (bila section
@@ -2485,6 +2638,10 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     atau "left". Halaman depan tetap Romawi TENGAH dan halaman
     pertama tiap BAB tetap TENGAH (aturan final user) — hanya
     nomor isi biasa yang mengikuti pilihan ini.
+    body_align (v0.6.33): "top-right" (pilihan "Kanan atas") —
+    nomor halaman isi pindah ke HEADER kanan atas; footer isi
+    dikosongkan dari nomor. Halaman depan tetap Romawi TENGAH
+    bawah dan halaman pertama tiap BAB tetap TENGAH bawah.
     Halaman pertama tiap BAB memakai footer first-page (titlePg)
     dengan field PAGE rata tengah di bawah; halaman lain tetap
     Romawi tengah (halaman depan) atau Arab di posisi body_align
@@ -2530,9 +2687,14 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     Kembalikan True bila batas BAB I ditemukan (Romawi -> Arab)."""
     doc = Document(out_path)
     # v0.6.32: posisi nomor halaman isi (bukan halaman pertama BAB).
+    # v0.6.33: "top-right" — nomor isi di header kanan atas, footer
+    # isi dikosongkan dari nomor (halaman depan + halaman pertama
+    # BAB tetap tengah bawah).
+    top_right = (body_align or "right").lower() == "top-right"
     body_align_enum = {"right": WD_ALIGN_PARAGRAPH.RIGHT,
                        "center": WD_ALIGN_PARAGRAPH.CENTER,
-                       "left": WD_ALIGN_PARAGRAPH.LEFT}.get(
+                       "left": WD_ALIGN_PARAGRAPH.LEFT,
+                       "top-right": WD_ALIGN_PARAGRAPH.RIGHT}.get(
                            (body_align or "right").lower(),
                            WD_ALIGN_PARAGRAPH.RIGHT)
     # Cari paragraf judul tiap BAB (kenal judul telanjang "BAB I" yang
@@ -2815,9 +2977,20 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     except Exception:
         even_odd = False
     for i, s in enumerate(doc.sections):
-        align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
-                 else body_align_enum)
-        _ensure_section_footers(s, align, i == 0, even_odd)
+        if i < body_idx:
+            _ensure_section_footers(s, WD_ALIGN_PARAGRAPH.CENTER, i == 0,
+                                    even_odd)
+            if top_right:
+                # Halaman depan: header tidak boleh membawa nomor
+                # (hanya Romawi tengah bawah di footer).
+                _strip_section_headers(s, even_odd)
+        elif top_right:
+            # v0.6.33: nomor isi di header kanan atas; footer isi
+            # dikosongkan dari nomor.
+            _ensure_section_headers_top_right(s, even_odd)
+            _strip_section_footers(s, even_odd)
+        else:
+            _ensure_section_footers(s, body_align_enum, i == 0, even_odd)
     # --- cover dulu, SEBELUM footer tengah BAB ---
     # (v0.6.10) Urutan penting: first-page footer cover harus
     # dikosongkan SEBELUM _ensure_bab_first_page_footer membuat
@@ -2912,8 +3085,20 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         if _sectPr_break_is_new_page(doc.sections[i]._sectPr):
             continue
         _cont_secs.add(i)
-        _ensure_footer_number_on(
-            doc.sections[i].footer, WD_ALIGN_PARAGRAPH.CENTER)
+        if top_right:
+            # v0.6.33: JANGAN tengahkan footer DEFAULT section ini
+            # (cadangan v0.6.14) — footer default dipakai halaman
+            # isi berikutnya, dan nomor tengah di sana akan tampil
+            # BERSAMAAN dengan nomor kanan atas (nomor ganda).
+            # Sebagai gantinya, nomor tengah halaman pertama BAB
+            # lewat first-page footer (titlePg): hanya berlaku di
+            # halaman pertama section ini. Tambahkan ke `centered`
+            # supaya titlePg tidak dihapus loop "titlePg liar".
+            centered.add(i)
+            _ensure_bab_first_page_footer(doc.sections[i])
+        else:
+            _ensure_footer_number_on(
+                doc.sections[i].footer, WD_ALIGN_PARAGRAPH.CENTER)
         # Section sebelumnya (paragraf kosong di atas judul):
         # paragrafnya dari paragraf pertama section itu sampai
         # paragraf sebelum paragraf pertama section BAB ini.
@@ -2930,17 +3115,31 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
                     _ensure_footer_number_on(
                         doc.sections[i - 1].footer,
                         WD_ALIGN_PARAGRAPH.CENTER)
+                    if top_right:
+                        # Halaman judul BAB memakai header section
+                        # sebelumnya (paragraf pertamanya di sana,
+                        # v0.6.14) — buang nomor atas supaya halaman
+                        # pertama BAB hanya menampilkan nomor tengah
+                        # bawah.
+                        _strip_page_fields_from_header_footer(
+                            doc.sections[i - 1].header)
                     _sp_prev = doc.sections[i - 1]._sectPr
                     if _sp_prev.find(qn("w:titlePg")) is not None:
+                        # v0.6.33: perbaiki pemanggilan v0.6.32 yang
+                        # mengoper 2 argumen ke fungsi 1 argumen
+                        # (TypeError laten bila cabang ini tercapai).
                         _ensure_bab_first_page_footer(
-                            doc.sections[i - 1],
-                            WD_ALIGN_PARAGRAPH.CENTER)
+                            doc.sections[i - 1])
     for i, s in enumerate(doc.sections):
         if i in _cont_secs:
             continue
-        _align = (WD_ALIGN_PARAGRAPH.CENTER if i < body_idx
-                  else body_align_enum)
-        _ensure_footer_number_on(s.footer, _align)
+        if i < body_idx:
+            _ensure_footer_number_on(s.footer, WD_ALIGN_PARAGRAPH.CENTER)
+        elif top_right:
+            _ensure_section_headers_top_right(s, even_odd)
+            _strip_section_footers(s, even_odd)
+        else:
+            _ensure_footer_number_on(s.footer, body_align_enum)
     # Hapus titlePg LIAR dari section lain (kecuali cover sec 0):
     # titlePg warisan sumber pada section yang paragraf pertamanya
     # BUKAN BAB yang mulai di halaman baru akan menengahkan halaman
@@ -2955,6 +3154,14 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         _tp = _sp.find(qn("w:titlePg"))
         if _tp is not None:
             _sp.remove(_tp)
+    # v0.6.33: normalisasi urutan anak sectPr SETELAH semua perubahan
+    # header/footer — python-docx menyisipkan referensi header baru
+    # SETELAH referensi footer yang sudah ada (urutan tidak valid
+    # menurut schema), dan LibreOffice lalu mengabaikan footer
+    # first-page section itu (nifas: halaman pertama BAB II-IV
+    # tanpa nomor sama sekali).
+    for _s in doc.sections:
+        _normalize_sectPr_order(_s._sectPr)
     doc.save(out_path)
     return True
 
@@ -3308,7 +3515,11 @@ def process(docx_path, work_dir, include_lists=True, body_align="right"):
     body_align (v0.6.32): posisi nomor halaman isi — "right"
     (default), "center", atau "left"; diteruskan ke semua
     pemanggilan add_footer_page_numbers. Nilai di luar itu
-    dianggap "right"."""
+    dianggap "right".
+    body_align (v0.6.33): ditambah "top-right" (pilihan "Kanan
+    atas") — nomor isi di header kanan atas; "left" (Kiri bawah)
+    dihapus dari website tapi tetap diterima mesin (perilaku lama)
+    bila ada job lama yang mengirimnya."""
     os.makedirs(work_dir, exist_ok=True)
     # v0.6.31: tolak zip bomb SEBELUM parse apa pun.
     _check_decompressed_size(docx_path)
