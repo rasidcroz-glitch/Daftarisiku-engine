@@ -2754,6 +2754,31 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
         if pPr.find(qn("w:sectPr")) is None:
             pPr.append(_new_sectPr_from(body_sectPr))
 
+    # v0.6.35: dokumen TEPAT 1 section yang section-nya memuat judul
+    # halaman depan (_has_front True) — satu-satunya section jadi
+    # decimal start=1 sehingga footer halaman depan tampil Arab
+    # ("2","3",...) dan footer BAB I tampil "4", bukan "1" (makalah
+    # ppkn; bug dilapor user 24 Nov 2026, "bab smpe sblm bab 1 skrg
+    # malah angka"). Tambah sectPr continuous di paragraf BAB I,
+    # lalu biarkan blok _moved di bawah memindahkannya ke paragraf
+    # SEBELUMNYA (pola v0.6.11): batas section jatuh TEPAT sebelum
+    # judul BAB I sehingga section 1 (decimal start=1) mulai DI
+    # judul — halaman judul BAB I menampilkan "1" tengah, bukan
+    # Romawi. SectPr DI judul saja tidak cukup: batas section
+    # jatuh sesudah judul (judul tetap di section depan, footer
+    # "4", dan LibreOffice menambah 1 halaman). Syarat: BAB I
+    # mulai di halaman baru (bab_new_page True); bila mulai di
+    # tengah halaman, JANGAN tambah (batasan yang sudah diterima
+    # user). Gate tidak menyentuh dokumen multi-section
+    # (len(doc.sections) == 1).
+    _added_1sec = False
+    if (_has_front and not force_bab1_page_break and bab_new_page
+            and len(doc.sections) == 1):
+        pPr = bab_para._p.get_or_add_pPr()
+        if pPr.find(qn("w:sectPr")) is None:
+            pPr.append(_new_sectPr_from(body_sectPr))
+            _added_1sec = True
+
     # --- v0.6.13 (paksa): judul BAB I harus jadi paragraf pertama
     # section Arab di halaman baru. Caranya BUKAN memindah sectPr
     # judul ke paragraf sebelumnya — itu menggeser batas section
@@ -2811,8 +2836,14 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
     # BAB tengah halaman dibiarkan seperti v0.6.10 (footer tetap
     # Romawi tengah dari section depan); memaksanya jadi "1"
     # butuh halaman baru, dan itu mengubah pagination.
+    # v0.6.35: pemindahan juga dipakai untuk sectPr 1-section yang
+    # baru ditambah di atas (_added_1sec): batas section harus
+    # jatuh SEBELUM judul BAB I (section Arab mulai DI judul,
+    # footer "1"), bukan sesudah judul. Paragraf sebelumnya di
+    # sini hanya paragraf kosong ber-break run (makalah) sehingga
+    # pemindahan tidak menggeser isi halaman depan.
     _moved = False
-    if not _has_front and bab_j > 0 and bab_new_page:
+    if bab_j > 0 and bab_new_page and (not _has_front or _added_1sec):
         _bpPr = bab_para._p.find(qn("w:pPr"))
         _bsp = (_bpPr.find(qn("w:sectPr"))
                 if _bpPr is not None else None)
@@ -2823,10 +2854,39 @@ def add_footer_page_numbers(out_path, entries, bab_new_page=None,
                 _prev = doc.paragraphs[bab_j - 1]
                 _ppPr = _prev._p.get_or_add_pPr()
                 if _ppPr.find(qn("w:sectPr")) is None:
-                    if _strip_break_runs(_prev):
-                        bab_para.paragraph_format.page_break_before = True
+                    _stripped = _strip_break_runs(_prev)
                     _bpPr.remove(_bsp)
                     _ppPr.append(_bsp)
+                    if _added_1sec:
+                        # v0.6.35: ubah sectPr pindahan jadi nextPage.
+                        # LibreOffice MENGABAIKAN pgNumType
+                        # (lowerRoman) pada section yang ditutup
+                        # break continuous — footer depan tetap Arab
+                        # ("2","3") — tapi menerapkannya pada break
+                        # nextPage (dibuktikan eksperimen minimal:
+                        # continuous -> angka Arab, nextPage -> "ii").
+                        # Break-nya tetap TEPAT SATU: nextPage ini
+                        # MENGGANTIKAN satu break eksplisit yang
+                        # sudah ada — run break yang baru dibuang,
+                        # atau pageBreakBefore judul (dihapus).
+                        # Bila tidak ada break eksplisit (BAB I
+                        # kebetulan di halaman baru), biarkan
+                        # continuous supaya pagination tidak berubah
+                        # (depan tetap Arab — batasan).
+                        _mt = _bsp.find(qn("w:type"))
+                        if _mt is None:
+                            _mt = OxmlElement("w:type")
+                            _bsp.insert(0, _mt)
+                        if (_stripped
+                                or bab_para.paragraph_format
+                                .page_break_before):
+                            _mt.set(qn("w:val"), "nextPage")
+                            bab_para.paragraph_format.\
+                                page_break_before = None
+                        else:
+                            _mt.set(qn("w:val"), "continuous")
+                    elif _stripped:
+                        bab_para.paragraph_format.page_break_before = True
                     _moved = True
 
     # --- v0.6.11 (lanjutan): dua perbaikan yang membuat pemindahan
