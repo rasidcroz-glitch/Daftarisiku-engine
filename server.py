@@ -81,6 +81,8 @@ Jalankan lokal:  gunicorn -c gunicorn.conf.py server:app
 """
 
 import base64
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -115,7 +117,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.36"  # v0.6.36: footer Romawi dokumen 1 section yang BAB I-nya mulai di halaman baru TANPA break eksplisit (SKRIPSI ACA 24 Nov 2026: sectPr pindahan 1-section kini jadi nextPage bila bab_new_page True dari PDF pra-footer — break nextPage itu netral pagination karena BAB I sudah di puncak halaman baru, dan LibreOffice baru menerapkan lowerRoman; sebelumnya fallback continuous membuat footer depan tetap Arab "2"–"7" walau label TOC Romawi dan verifikasi "lolos"). v0.6.35: footer Romawi dokumen 1 section — sectPr continuous di paragraf BAB I bila tepat 1 section + _has_front + BAB I mulai di halaman baru (makalah: depan Romawi, bab1_footer=1). v0.6.34: simulasi bayar bertoken POST /api/pay/simulate/<job> (sandbox saja; wajib header X-Reports-Token = REPORTS_TOKEN, tanpa token -> 404; mati total bila MIDTRANS_IS_PRODUCTION=1; pengganti /api/pay/mock yang ditutup v0.6.28 — mock lama TETAP tertutup, tidak dibuka lagi). v0.6.33: posisi "Kanan atas" (page_pos: top-right) — nomor halaman isi di header kanan atas, footer isi dikosongkan; "Kiri bawah" (left) dihapus dari website. Halaman depan + halaman pertama BAB tetap tengah. Perbaiki juga pemanggilan _ensure_bab_first_page_footer 2-argumen (TypeError laten v0.6.32). v0.6.32: pilihan posisi nomor halaman isi (page_pos: right/center/left; halaman depan + halaman pertama BAB tetap tengah). v0.6.31: anti-DoS + strip rel eksternal (audit keamanan 23 Nov): antrean maks 5 (penuh -> 429), rate limit upload 5/jam/IP (env MAX_UPLOADS_PER_HOUR), tolak .docx yang mengembang >100 MB total / >50 MB per file (zip bomb), hapus relasi eksternal dari salinan + hasil sebelum di-render LibreOffice. v0.6.30: pengerasan bayar + laporan (audit keamanan 23 Nov): tandai lunas hanya bila gross_amount Midtrans == Rp15.000; batasi charge QRIS maks 5/job; /api/reports wajib token rahasia (env REPORTS_TOKEN); pesan error ke pelanggan generik (detail hanya di log server); security headers di semua respons engine. v0.6.28: endpoint /api/pay/mock DIHAPUS (celah keamanan: siapa pun yang tahu link job bisa menandai lunas gratis); website sudah tidak memakainya sejak PAY_MOCK=false, bayar hanya lewat QRIS Midtrans. v0.6.27: jeda halaman setelah tiap daftar berlaku umum tanpa memandang urutan heading di dokumen — (a) jeda setelah entri DAFTAR ISI terakhir juga di jalur dokumen YANG PUNYA heading DAFTAR ISI (makalah ppkn: BAB I + isi bab menempel di halaman daftar isi); (b) jeda setelah Daftar Gambar tidak lagi dilewati bila ada Daftar Tabel — urutan daftar mengikuti heading dokumen, dan bila Daftar Tabel sudah ada SEBELUM Daftar Gambar (Gusti Ayu), judul BAB I menempel di halaman Daftar Gambar; (c) _needs_break_after kini mengenali break pada paragraf KOSONG (run break / sectPr nextPage) — jeda tambahan di atas break sumber jadi halaman kosong (UJI_COBA_2); (d) run break footer v0.6.11 langkah (b) hanya disisipkan bila tidak ada isi di antara judul BAB I dan sectPr penutup — bila ada isi, section break penutup sudah memisahkan sendiri dan run break tambahan jadi halaman kosong (Gusti Ayu). v0.6.26: daftar isi diletakkan sebelum judul BAB I + jeda halaman setelah Daftar Gambar/Tabel terakhir (dokumen tanpa heading "DAFTAR ISI"; cacat 22 Nov 2026). v0.6.25: gaya penomoran daftar isi mengikuti gaya dokumen sendiri — nomor dirender Word di isi dokumen (simulasi penghitung list Word atas semua paragraf: '1.1' bertitik, 'I.' Romawi, 'A.' huruf; jatuh ke awalan literal judul bila tanpa numPr, lalu format contoh dosen). v0.6.24: judul DAFTAR ISI yang membawa sectPr sendiri kini sectPr-nya dihapus (bila format nomor sama) + page_break_before, supaya judul+entri mulai di halaman baru (cacat UJI_COBA_2: judul yatim di halaman sendiri, footer jadi Arab "10"). v0.6.23: label TOC dari PDF hasil dihitung dari baris judul (bukan substring) + bab1 = halaman Arab '1' (bukan halaman judul BAB I — bila BAB I mulai di tengah halaman, halaman judulnya masih Romawi; label dihitung dari footer, diklem minimal 1) + strip nomor gaya '1)' + gabung judul 3 baris — perbaikan cacat UJI_COBA_2 (BAB II–V 5 halaman terlalu kecil karena paragraf Sistematika Penulisan menyebut semua judul BAB) dan Gusti Ayu (sub-judul indikator '1)' + BAB I tengah halaman). v0.6.22: AI Document Checker — check_document() di toc.py (aturan struktur, tanpa API, laporan saja): judul BAB tidak konsisten (Romawi vs Arab), penomoran sub-bab loncat / sub-sub tanpa induk, tabel/gambar tanpa keterangan bernomor, entri yang nomor halamannya tak terverifikasi. Hasilnya di payload "checker_warnings"; website menampilkan kotaknya di pratinjau. v0.6.21: tombol "Laporkan hasil salah" — POST /api/report/<job> (satu laporan per job, TIDAK membuka download; disimpan {job}.report.json, ikut kedaluwarsa 24 jam) + GET /api/reports (daftar laporan untuk pemilik/Muse). Website: tombol ghost di layar pratinjau + prompt deskripsi opsional + status konfirmasi. v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
+VERSION = "0.6.37"  # v0.6.37: integrasi Kasera Pay — POST /api/pay/kasera/<job> (QRIS Rp15.000 otomatis; kunci dari env KASERA_PAY_KEY, 503 bila belum disetel), webhook POST /api/pay/kasera/webhook (verifikasi HMAC-SHA256 Kasera-Signature-V1, dedupe id event, hanya payment.paid yang melunasi), GET /api/pay/kasera/<job>/qr (PNG QRIS Kasera), /api/status kini membawa info kasera + polling status Kasera. Midtrans + simulasi TIDAK diubah. v0.6.36: footer Romawi dokumen 1 section yang BAB I-nya mulai di halaman baru TANPA break eksplisit (SKRIPSI ACA 24 Nov 2026: sectPr pindahan 1-section kini jadi nextPage bila bab_new_page True dari PDF pra-footer — break nextPage itu netral pagination karena BAB I sudah di puncak halaman baru, dan LibreOffice baru menerapkan lowerRoman; sebelumnya fallback continuous membuat footer depan tetap Arab "2"–"7" walau label TOC Romawi dan verifikasi "lolos"). v0.6.35: footer Romawi dokumen 1 section — sectPr continuous di paragraf BAB I bila tepat 1 section + _has_front + BAB I mulai di halaman baru (makalah: depan Romawi, bab1_footer=1). v0.6.34: simulasi bayar bertoken POST /api/pay/simulate/<job> (sandbox saja; wajib header X-Reports-Token = REPORTS_TOKEN, tanpa token -> 404; mati total bila MIDTRANS_IS_PRODUCTION=1; pengganti /api/pay/mock yang ditutup v0.6.28 — mock lama TETAP tertutup, tidak dibuka lagi). v0.6.33: posisi "Kanan atas" (page_pos: top-right) — nomor halaman isi di header kanan atas, footer isi dikosongkan; "Kiri bawah" (left) dihapus dari website. Halaman depan + halaman pertama BAB tetap tengah. Perbaiki juga pemanggilan _ensure_bab_first_page_footer 2-argumen (TypeError laten v0.6.32). v0.6.32: pilihan posisi nomor halaman isi (page_pos: right/center/left; halaman depan + halaman pertama BAB tetap tengah). v0.6.31: anti-DoS + strip rel eksternal (audit keamanan 23 Nov): antrean maks 5 (penuh -> 429), rate limit upload 5/jam/IP (env MAX_UPLOADS_PER_HOUR), tolak .docx yang mengembang >100 MB total / >50 MB per file (zip bomb), hapus relasi eksternal dari salinan + hasil sebelum di-render LibreOffice. v0.6.30: pengerasan bayar + laporan (audit keamanan 23 Nov): tandai lunas hanya bila gross_amount Midtrans == Rp15.000; batasi charge QRIS maks 5/job; /api/reports wajib token rahasia (env REPORTS_TOKEN); pesan error ke pelanggan generik (detail hanya di log server); security headers di semua respons engine. v0.6.28: endpoint /api/pay/mock DIHAPUS (celah keamanan: siapa pun yang tahu link job bisa menandai lunas gratis); website sudah tidak memakainya sejak PAY_MOCK=false, bayar hanya lewat QRIS Midtrans. v0.6.27: jeda halaman setelah tiap daftar berlaku umum tanpa memandang urutan heading di dokumen — (a) jeda setelah entri DAFTAR ISI terakhir juga di jalur dokumen YANG PUNYA heading DAFTAR ISI (makalah ppkn: BAB I + isi bab menempel di halaman daftar isi); (b) jeda setelah Daftar Gambar tidak lagi dilewati bila ada Daftar Tabel — urutan daftar mengikuti heading dokumen, dan bila Daftar Tabel sudah ada SEBELUM Daftar Gambar (Gusti Ayu), judul BAB I menempel di halaman Daftar Gambar; (c) _needs_break_after kini mengenali break pada paragraf KOSONG (run break / sectPr nextPage) — jeda tambahan di atas break sumber jadi halaman kosong (UJI_COBA_2); (d) run break footer v0.6.11 langkah (b) hanya disisipkan bila tidak ada isi di antara judul BAB I dan sectPr penutup — bila ada isi, section break penutup sudah memisahkan sendiri dan run break tambahan jadi halaman kosong (Gusti Ayu). v0.6.26: daftar isi diletakkan sebelum judul BAB I + jeda halaman setelah Daftar Gambar/Tabel terakhir (dokumen tanpa heading "DAFTAR ISI"; cacat 22 Nov 2026). v0.6.25: gaya penomoran daftar isi mengikuti gaya dokumen sendiri — nomor dirender Word di isi dokumen (simulasi penghitung list Word atas semua paragraf: '1.1' bertitik, 'I.' Romawi, 'A.' huruf; jatuh ke awalan literal judul bila tanpa numPr, lalu format contoh dosen). v0.6.24: judul DAFTAR ISI yang membawa sectPr sendiri kini sectPr-nya dihapus (bila format nomor sama) + page_break_before, supaya judul+entri mulai di halaman baru (cacat UJI_COBA_2: judul yatim di halaman sendiri, footer jadi Arab "10"). v0.6.23: label TOC dari PDF hasil dihitung dari baris judul (bukan substring) + bab1 = halaman Arab '1' (bukan halaman judul BAB I — bila BAB I mulai di tengah halaman, halaman judulnya masih Romawi; label dihitung dari footer, diklem minimal 1) + strip nomor gaya '1)' + gabung judul 3 baris — perbaikan cacat UJI_COBA_2 (BAB II–V 5 halaman terlalu kecil karena paragraf Sistematika Penulisan menyebut semua judul BAB) dan Gusti Ayu (sub-judul indikator '1)' + BAB I tengah halaman). v0.6.22: AI Document Checker — check_document() di toc.py (aturan struktur, tanpa API, laporan saja): judul BAB tidak konsisten (Romawi vs Arab), penomoran sub-bab loncat / sub-sub tanpa induk, tabel/gambar tanpa keterangan bernomor, entri yang nomor halamannya tak terverifikasi. Hasilnya di payload "checker_warnings"; website menampilkan kotaknya di pratinjau. v0.6.21: tombol "Laporkan hasil salah" — POST /api/report/<job> (satu laporan per job, TIDAK membuka download; disimpan {job}.report.json, ikut kedaluwarsa 24 jam) + GET /api/reports (daftar laporan untuk pemilik/Muse). Website: tombol ghost di layar pratinjau + prompt deskripsi opsional + status konfirmasi. v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
@@ -131,6 +133,17 @@ QRIS_EXPIRY_SECONDS = 15 * 60  # default Midtrans untuk QRIS: 15 menit
 # (dari env, di-set di drop-in VPS; JANGAN tulis nilainya di kode/chat).
 MAX_QRIS_ATTEMPTS = 5
 REPORTS_TOKEN = os.environ.get("REPORTS_TOKEN", "")
+
+# --- konfigurasi Kasera Pay (v0.6.37; kunci HANYA dari env) --------
+# KASERA_PAY_KEY: kp_test_... (sandbox) atau kp_live_... (produksi),
+# dibuat di dashboard Kasera menu Developer. KASERA_PAY_WEBHOOK_SECRET:
+# signing secret endpoint webhook (berbeda per mode test/live).
+# Kosong = jalur Kasera mati (endpoint bayar menjawab 503, webhook 503).
+KASERA_PAY_KEY = os.environ.get("KASERA_PAY_KEY", "")
+KASERA_PAY_WEBHOOK_SECRET = os.environ.get(
+    "KASERA_PAY_WEBHOOK_SECRET", "")
+KASERA_PAY_BASE_URL = os.environ.get(
+    "KASERA_PAY_BASE_URL", "https://pay.kasera.id")
 
 
 # --- CORS manual (tanpa dependensi tambahan) ------------------------
@@ -156,6 +169,9 @@ def apply_cors(resp):
 @app.route("/api/download/<job>", methods=["OPTIONS"])
 @app.route("/api/pay/qris/<job>", methods=["OPTIONS"])
 @app.route("/api/pay/simulate/<job>", methods=["OPTIONS"])
+@app.route("/api/pay/kasera/<job>", methods=["OPTIONS"])
+@app.route("/api/pay/kasera/webhook", methods=["OPTIONS"])
+@app.route("/api/pay/kasera/<job>/qr", methods=["OPTIONS"])
 @app.route("/api/qr/<job>", methods=["OPTIONS"])
 def _preflight(job=None):
     return ("", 204)
@@ -231,6 +247,122 @@ def _midtrans_request(method, path, body=None, timeout=15):
         raise MidtransError(
             "tidak bisa menghubungi Midtrans, coba lagi sebentar lagi"
         ) from exc
+
+
+# --- Kasera Pay (v0.6.37; QRIS otomatis pengganti Midtrans) -----------
+# Kontrak: https://pay.kasera.id/en/docs/api — POST /v1/transactions
+# (Bearer kp_test_/kp_live_, Idempotency-Key, amount rupiah utuh,
+# payment_methods ["qris"]) -> payment {type "qr", qr_string},
+# checkout_url, expires_at (ISO-8601 +07:00). Webhook payment.paid:
+# header Kasera-Signature-V1 "t=<unix>,v1=<hex>" = HMAC-SHA256
+# "<unix>.<raw body>" dengan signing secret endpoint; tolak bila
+# |now-t| > 300 detik; dedupe pada id event (at-least-once).
+class KaseraPayError(Exception):
+    pass
+
+
+def _kasera_request(method, path, body=None, idempotency_key=None,
+                    timeout=15):
+    """Panggil API Kasera Pay; kembalikan dict JSON.
+    Melempar KaseraPayError bila kunci belum disetel, jaringan gagal,
+    atau Kasera menjawab error."""
+    if not KASERA_PAY_KEY:
+        raise KaseraPayError("pembayaran Kasera belum diaktifkan di server")
+    url = KASERA_PAY_BASE_URL.rstrip("/") + path
+    headers = {"Authorization": f"Bearer {KASERA_PAY_KEY}",
+               "Accept": "application/json",
+               "Content-Type": "application/json"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers,
+                                 method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode() or "{}")
+            err = detail.get("error") or {}
+            msg = err.get("message") or err.get("code") \
+                or f"HTTP {exc.code}"
+        except (ValueError, UnicodeDecodeError):
+            msg = f"HTTP {exc.code}"
+        raise KaseraPayError(f"Kasera Pay: {msg} (HTTP {exc.code})") \
+            from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise KaseraPayError(
+            "tidak bisa menghubungi Kasera Pay, coba lagi sebentar lagi"
+        ) from exc
+
+
+def _parse_kasera_expiry(expires_at, fallback_epoch):
+    """'2026-11-25T14:30:00+07:00' (ISO-8601) -> epoch;
+    gagal parse -> fallback."""
+    if expires_at:
+        try:
+            dt = datetime.fromisoformat(
+                str(expires_at).replace("Z", "+00:00"))
+            return int(dt.timestamp())
+        except ValueError:
+            pass
+    return fallback_epoch
+
+
+def _kasera_verify_signature(raw, header, secret):
+    """True bila Kasera-Signature-V1 sah: 't=<unix>,v1=<hex>[,v1=<hex>]',
+    v1 = HMAC-SHA256('<unix>.<raw body>'); toleransi 5 menit; cukup
+    satu v1 yang cocok (dua v1 selama 24 jam setelah rotasi secret)."""
+    parts = (header or "").split(",")
+    if not parts or not parts[0].startswith("t="):
+        return False
+    try:
+        t = int(parts[0][2:])
+    except ValueError:
+        return False
+    if abs(time.time() - t) > 300:
+        return False
+    signed = f"{t}.".encode() + raw
+    expected = hmac.new(secret.encode(), signed,
+                        hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(p[3:], expected)
+               for p in parts[1:] if p.startswith("v1="))
+
+
+def _kasera_info(job, rec):
+    """Ringkasan pembayaran Kasera untuk website (tanpa qr_string)."""
+    if not rec or not rec.get("kasera_payment_id"):
+        return None
+    now = int(time.time())
+    expires_at = rec.get("kasera_expires_at") or now
+    return {"payment_id": rec["kasera_payment_id"],
+            "status": rec.get("kasera_status", "pending"),
+            "checkout_url": rec.get("kasera_checkout_url"),
+            "expires_in_seconds": max(0, expires_at - now),
+            "qr_url": f"/api/pay/kasera/{job}/qr"}
+
+
+def _kasera_find_job(payment_request_id, external_id):
+    """Cari job dari webhook: cocokkan payment_request_id yang disimpan
+    saat create (otoritatif; external_id boleh kembar). Fallback ke
+    external_id (= job) hanya bila catatannya membawa payment id yang
+    sama. None bila bukan pembayaran server ini."""
+    if payment_request_id:
+        try:
+            for name in os.listdir(RESULTS_DIR):
+                if not name.endswith(".pay.json"):
+                    continue
+                job = name[:-len(".pay.json")]
+                if load_pay(job).get("kasera_payment_id") \
+                        == payment_request_id:
+                    return job
+        except OSError:
+            pass
+    if external_id and external_id.isalnum() and len(external_id) <= 32:
+        rec = load_pay(external_id)
+        if rec.get("kasera_payment_id") == payment_request_id:
+            return external_id
+    return None
 
 
 def _pay_path(job):
@@ -744,6 +876,198 @@ def simulate_pay(job):
                     "amount": PRICE_IDR}), 200
 
 
+@app.post("/api/pay/kasera/<job>")
+def kasera_pay(job):
+    """Buat (atau pakai ulang) pembayaran QRIS Kasera Rp15.000 untuk
+    sebuah job. Idempotency-Key 'daftarisiku-<job>-<attempt>' dibuat
+    SEKALI per percobaan dan disimpan di pay.json SEBELUM API
+    dipanggil, jadi percobaan ulang setelah timeout tidak membuat
+    tagihan kedua. Pembayaran yang masih berlaku dipakai ulang (QR
+    yang sama); yang kedaluwarsa dicek sekali ke Kasera, siapa tahu
+    pelanggan sempat bayar di detik-detik terakhir. 503 bila
+    KASERA_PAY_KEY belum disetel; 409 bila job sudah dibayar."""
+    if not job.isalnum() or len(job) > 32:
+        return jsonify({"error": "job tidak valid"}), 400
+    path = os.path.join(RESULTS_DIR, f"{job}-hasil-daftar-isi.docx")
+    if not os.path.exists(path):
+        return jsonify({"error": "hasil tidak ditemukan"}), 404
+    if job in load_paid():
+        return jsonify({"error": "dokumen ini sudah dibayar"}), 409
+    if not KASERA_PAY_KEY:
+        return jsonify(
+            {"error": "pembayaran Kasera belum diaktifkan di server"}), 503
+
+    now = int(time.time())
+    rec = load_pay(job)
+    # Pembayaran Kasera masih berlaku -> pakai ulang (QR yang sama).
+    if rec.get("kasera_payment_id") \
+            and rec.get("kasera_status") == "pending" \
+            and (rec.get("kasera_expires_at") or 0) > now \
+            and rec.get("kasera_qr_string"):
+        info = _kasera_info(job, rec)
+        return jsonify({"job": job, "payment_id": rec["kasera_payment_id"],
+                        "amount": PRICE_IDR,
+                        "qr_url": info["qr_url"],
+                        "checkout_url": rec.get("kasera_checkout_url"),
+                        "expires_in_seconds": info["expires_in_seconds"],
+                        "status": "pending", "reused": True}), 201
+    # Kedaluwarsa: cek sekali ke Kasera, siapa tahu sudah lunas.
+    if rec.get("kasera_payment_id") \
+            and rec.get("kasera_status") == "pending":
+        try:
+            st = _kasera_request(
+                "GET", f"/v1/transactions/{rec['kasera_payment_id']}")
+            if st.get("status") == "succeeded" \
+                    and int(st.get("amount") or 0) == PRICE_IDR:
+                rec["kasera_status"] = "succeeded"
+                _mark_paid(job, rec)
+                return jsonify({"job": job, "paid": True,
+                                "amount": PRICE_IDR}), 200
+            if st.get("status") == "succeeded":
+                print(f"PERINGATAN nominal Kasera tidak cocok "
+                      f"job {job}: {st.get('amount')}", flush=True)
+            elif st.get("status") in ("expired", "failed", "canceled"):
+                rec["kasera_status"] = st["status"]
+                save_pay(job, rec)
+        except KaseraPayError:
+            pass  # lanjut buat pembayaran baru; status dicek lagi nanti
+        except (TypeError, ValueError):
+            pass
+
+    if int(rec.get("kasera_attempt") or 0) >= MAX_QRIS_ATTEMPTS:
+        return jsonify(
+            {"error": "terlalu banyak percobaan bayar untuk dokumen ini"}), 429
+    attempt = int(rec.get("kasera_attempt") or 0) + 1
+    idem_key = f"daftarisiku-{job}-{attempt}"
+    rec["kasera_attempt"] = attempt
+    rec["kasera_idempotency_key"] = idem_key
+    save_pay(job, rec)  # kunci disimpan SEBELUM API dipanggil
+    try:
+        with open(os.path.join(RESULTS_DIR, f"{job}.meta.json")) as mf:
+            filename = (json.load(mf) or {}).get("filename") or job
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        filename = job
+    body = {"amount": PRICE_IDR,
+            "description": f"DaftarIsiKu: {filename}"[:120],
+            "external_id": job,
+            "payment_methods": ["qris"]}
+    try:
+        resp = _kasera_request("POST", "/v1/transactions", body,
+                               idempotency_key=idem_key)
+    except KaseraPayError as exc:
+        return jsonify({"error": str(exc)}), 502
+    payment = resp.get("payment") or {}
+    qr_string = payment.get("qr_string") or ""
+    if payment.get("type") != "qr" or not qr_string:
+        return jsonify(
+            {"error": "Kasera Pay tidak mengembalikan kode QRIS"}), 502
+    created = int(time.time())
+    rec["kasera_payment_id"] = resp.get("id")
+    rec["kasera_status"] = resp.get("status") or "pending"
+    rec["kasera_qr_string"] = qr_string
+    rec["kasera_checkout_url"] = resp.get("checkout_url")
+    rec["kasera_expires_at"] = _parse_kasera_expiry(
+        resp.get("expires_at"), created + QRIS_EXPIRY_SECONDS)
+    rec["kasera_created_at"] = created
+    rec["kasera_last_checked"] = 0
+    save_pay(job, rec)
+    info = _kasera_info(job, rec)
+    return jsonify({"job": job, "payment_id": rec["kasera_payment_id"],
+                    "amount": PRICE_IDR, "qr_url": info["qr_url"],
+                    "checkout_url": rec.get("kasera_checkout_url"),
+                    "expires_in_seconds": info["expires_in_seconds"],
+                    "status": "pending", "reused": False}), 201
+
+
+@app.post("/api/pay/kasera/webhook")
+def kasera_webhook():
+    """Terima webhook Kasera Pay. Hanya event payment.paid yang
+    melunasi job, dan hanya bila tanda tangan HMAC sah, nominal
+    == Rp15.000, dan payment_request_id cocok dengan pembayaran yang
+    dibuat server ini. Dedupe id event (pengiriman at-least-once).
+    Tanda tangan salah -> 401; secret belum disetel -> 503 (fail
+    closed, jangan pernah tandai lunas tanpa verifikasi). Event lain
+    (test.ping, payment.expired, payment.failed) dijawab 200 tanpa
+    mengubah apa pun."""
+    raw = request.get_data()
+    if not KASERA_PAY_WEBHOOK_SECRET:
+        return jsonify(
+            {"error": "webhook Kasera belum diaktifkan di server"}), 503
+    header = request.headers.get("Kasera-Signature-V1", "")
+    if not header or not _kasera_verify_signature(
+            raw, header, KASERA_PAY_WEBHOOK_SECRET):
+        return jsonify({"error": "tanda tangan tidak valid"}), 401
+    try:
+        event = json.loads(raw.decode())
+    except (ValueError, UnicodeDecodeError):
+        return jsonify({"error": "body bukan JSON"}), 400
+    if event.get("type") != "payment.paid":
+        return "", 200
+    data = event.get("data") or {}
+    job = _kasera_find_job(data.get("payment_request_id"),
+                           data.get("external_id"))
+    if job is None:
+        return "", 200  # bukan pembayaran server ini
+    rec = load_pay(job)
+    event_id = event.get("id") \
+        or request.headers.get("Kasera-Event-Id", "")
+    seen = rec.get("kasera_events") or []
+    if event_id and event_id in seen:
+        return "", 200  # duplikat: sudah diproses
+    try:
+        amount = int(data.get("amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    if amount != PRICE_IDR:
+        print(f"PERINGATAN nominal Kasera tidak cocok "
+              f"job {job}: {data.get('amount')}", flush=True)
+        return "", 200
+    if job in load_paid():
+        return "", 200
+    rec["kasera_status"] = "succeeded"
+    rec["kasera_paid_at"] = data.get("paid_at")
+    if event_id:
+        seen.append(event_id)
+        rec["kasera_events"] = seen[-20:]
+    _mark_paid(job, rec)
+    return "", 200
+
+
+@app.get("/api/pay/kasera/<job>/qr")
+def kasera_qr_image(job):
+    """Gambar PNG kode QRIS Kasera yang sedang aktif untuk job ini."""
+    if not job.isalnum() or len(job) > 32:
+        return jsonify({"error": "job tidak valid"}), 400
+    rec = load_pay(job)
+    qr_string = rec.get("kasera_qr_string") or ""
+    if not qr_string or rec.get("kasera_status") not in ("pending", None):
+        return jsonify({"error": "tidak ada kode QRIS aktif"}), 404
+    buf = _qr_png(qr_string)
+    if buf is None:
+        return jsonify(
+            {"error": "gambar QR tidak tersedia di server"}), 503
+    return send_file(buf, mimetype="image/png",
+                     download_name=f"qris-kasera-{job}.png")
+
+
+def _qr_png(qr_string):
+    """PNG kode QR dari qr_string (EMV QRIS); None bila library qrcode
+    tidak tersedia."""
+    try:
+        import qrcode
+    except ImportError:
+        return None
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                       box_size=8, border=2)
+    qr.add_data(qr_string)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 @app.get("/api/qr/<job>")
 def qris_image(job):
     """Gambar PNG kode QRIS charge yang sedang aktif untuk job ini.
@@ -756,20 +1080,10 @@ def qris_image(job):
     qr_string = rec.get("qr_string") or ""
     if not qr_string or rec.get("status") not in ("pending", None):
         return jsonify({"error": "tidak ada kode QRIS aktif"}), 404
-    try:
-        import qrcode
-        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
-                           box_size=8, border=2)
-        qr.add_data(qr_string)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
+    buf = _qr_png(qr_string)
+    if buf is not None:
         return send_file(buf, mimetype="image/png",
                          download_name=f"qris-{job}.png")
-    except ImportError:
-        pass
     # Cadangan: URL gambar Midtrans (bila library qrcode tidak ada).
     if rec.get("qr_image_url"):
         return redirect(rec["qr_image_url"])
@@ -877,10 +1191,54 @@ def status(job):
             qris_expired = True
     elif not paid and rec.get("status") in ("expire", "cancel", "deny"):
         qris_expired = True
+    # v0.6.37: pembayaran Kasera — polling status (dibatasi 1x/10 detik;
+    # Kasera membatasi baca 1x/detik per transaksi) bila masih pending.
+    kasera_expired = False
+    if not paid and rec.get("kasera_payment_id") \
+            and rec.get("kasera_status") == "pending":
+        now = int(time.time())
+        if KASERA_PAY_KEY \
+                and now - int(rec.get("kasera_last_checked") or 0) >= 10:
+            rec["kasera_last_checked"] = now
+            save_pay(job, rec)
+            try:
+                st = _kasera_request(
+                    "GET",
+                    f"/v1/transactions/{rec['kasera_payment_id']}")
+                tx = st.get("status")
+                if tx == "succeeded" \
+                        and int(st.get("amount") or 0) == PRICE_IDR:
+                    rec["kasera_status"] = "succeeded"
+                    _mark_paid(job, rec)
+                    paid = True
+                elif tx == "succeeded":
+                    print(f"PERINGATAN nominal Kasera tidak cocok "
+                          f"job {job}: {st.get('amount')}", flush=True)
+                elif tx in ("expired", "failed", "canceled"):
+                    rec["kasera_status"] = tx
+                    save_pay(job, rec)
+                    kasera_expired = True
+            except KaseraPayError as exc:
+                # 404 = payment id tidak dikenal Kasera -> anggap hangus.
+                if "HTTP 404" in str(exc):
+                    rec["kasera_status"] = "expired"
+                    save_pay(job, rec)
+                    kasera_expired = True
+                # Error lain: kembalikan info terakhir yang tersimpan.
+                pass
+            except (TypeError, ValueError):
+                pass
+        elif (rec.get("kasera_expires_at") or 0) <= now:
+            kasera_expired = True
+    elif not paid and rec.get("kasera_status") in ("expired", "failed",
+                                                   "canceled"):
+        kasera_expired = True
     resp = {"job": job, "status": "done", "paid": paid,
             "amount": PRICE_IDR, "filename": filename,
             "qris": None if paid else _qris_info(job, rec),
-            "qris_expired": qris_expired}
+            "qris_expired": qris_expired,
+            "kasera": None if paid else _kasera_info(job, rec),
+            "kasera_expired": kasera_expired}
     # Hasil pratinjau (v0.6.17) supaya website bisa merender pratinjau
     # dari polling status; job lama tanpa state tidak membawanya dan
     # website memakai pratinjau tersimpan di localStorage.
