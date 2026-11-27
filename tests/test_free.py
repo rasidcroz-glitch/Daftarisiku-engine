@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Tes kuota gratis v0.6.38: 10 dokumen pertama GRATIS (maks 1/IP).
+"""Tes kuota gratis v0.6.38 + kunci token v0.6.40: 10 dokumen pertama
+GRATIS (maks 1/pengunjung — token browser X-Free-Token, fallback IP).
 
 Kasus: counter 0->1->2 lalu job ke-3 wajib bayar (FREE_LIMIT=2 di tes);
 IP sama upload kedua wajib bayar meski kuota masih ada; IP beda tetap
-gratis; download job gratis tanpa bayar (docx + pdf); job belum bayar
+gratis; token beda dari IP yang sama tetap gratis (kasus 10.10.0.1);
+token sama dua kali wajib bayar; token tidak valid jatuh ke IP;
+download job gratis tanpa bayar (docx + pdf); job belum bayar
 non-gratis tetap 402; job lunas tetap bisa download; /api/status dan
 /api/health membawa angka gratis yang benar; job gratis TIDAK masuk
 paid.json; free_quota.json tidak dihapus cleanup_old_jobs.
@@ -78,19 +81,22 @@ def main():
             state["free_number"] = free_number
         S._save_job_state(job, state)
 
-    def upload(ip):
+    def upload(ip, token=None):
+        headers = {"X-Forwarded-For": ip}
+        if token is not None:
+            headers["X-Free-Token"] = token
         return client.post(
             "/api/toc",
             data={"file": (io.BytesIO(FAKE_DOCX), "Skripsi.docx")},
-            headers={"X-Forwarded-For": ip},
+            headers=headers,
             content_type="multipart/form-data")
 
     # 1. health membawa sisa kuota + batas
     r = client.get("/api/health")
     d = r.get_json() or {}
-    check("health: free_left=2, free_limit=2, version 0.6.38",
+    check("health: free_left=2, free_limit=2, version 0.6.40",
           d.get("free_left") == 2 and d.get("free_limit") == 2
-          and d.get("version") == "0.6.38"
+          and d.get("version") == "0.6.40"
           and d.get("status") == "ok", f"dapat {d}")
 
     # 2. upload pertama IP A -> gratis #1, counter 0->1
@@ -101,7 +107,7 @@ def main():
     check("upload IP A pertama -> 202 + gratis #1",
           r.status_code == 202 and job1
           and st1.get("free") is True and st1.get("free_number") == 1
-          and q.get("used") == 1 and q.get("ips") == ["10.0.0.1"],
+          and q.get("used") == 1 and q.get("ips") == ["ip:10.0.0.1"],
           f"dapat {r.status_code} {st1} {q}")
     check("job gratis TIDAK masuk paid.json", job1 not in S.load_paid())
 
@@ -197,6 +203,59 @@ def main():
           f"ada={os.path.exists(S.FREE_QUOTA_FILE)} {quota()}")
     check("cleanup tetap menghapus file jadul lain",
           not os.path.exists(dummy))
+
+    # 12. token per-browser (v0.6.40): IP sama, token beda -> gratis.
+    # Reset kuota dulu (file dihapus -> kosong).
+    os.remove(S.FREE_QUOTA_FILE)
+    r = upload("10.0.0.1", token="tok-aaa")
+    jobt1 = (r.get_json() or {}).get("job")
+    stt1 = S._load_job_state(jobt1) if jobt1 else {}
+    check("token A dari IP sama -> gratis #1 (kunci tok:)",
+          r.status_code == 202 and jobt1
+          and stt1.get("free") is True and stt1.get("free_number") == 1
+          and quota().get("used") == 1
+          and quota().get("ips") == ["tok:tok-aaa"],
+          f"dapat {r.status_code} {stt1} {quota()}")
+    r = upload("10.0.0.1", token="tok-bbb")
+    jobt2 = (r.get_json() or {}).get("job")
+    stt2 = S._load_job_state(jobt2) if jobt2 else {}
+    check("token B dari IP sama -> gratis #2 (kasus 10.10.0.1)",
+          r.status_code == 202 and jobt2
+          and stt2.get("free") is True and stt2.get("free_number") == 2
+          and quota().get("used") == 2,
+          f"dapat {r.status_code} {stt2} {quota()}")
+    r = upload("10.0.0.1", token="tok-aaa")
+    jobt3 = (r.get_json() or {}).get("job")
+    stt3 = S._load_job_state(jobt3) if jobt3 else {}
+    check("token A kedua kali -> bukan gratis (1 per token)",
+          r.status_code == 202 and jobt3 and not stt3.get("free")
+          and quota().get("used") == 2,
+          f"dapat {r.status_code} {stt3} {quota()}")
+
+    # 13. token tidak valid -> jatuh ke IP.
+    os.remove(S.FREE_QUOTA_FILE)
+    r = upload("10.0.0.9", token="bad token!")
+    jobt4 = (r.get_json() or {}).get("job")
+    stt4 = S._load_job_state(jobt4) if jobt4 else {}
+    check("token tidak valid -> gratis #1 via fallback IP",
+          r.status_code == 202 and jobt4
+          and stt4.get("free") is True and stt4.get("free_number") == 1
+          and quota().get("ips") == ["ip:10.0.0.9"],
+          f"dapat {r.status_code} {stt4} {quota()}")
+    r = upload("10.0.0.9", token="bad token!")
+    jobt5 = (r.get_json() or {}).get("job")
+    stt5 = S._load_job_state(jobt5) if jobt5 else {}
+    check("token tidak valid kedua kali -> bukan gratis (IP sudah pakai)",
+          r.status_code == 202 and jobt5 and not stt5.get("free")
+          and quota().get("used") == 1,
+          f"dapat {r.status_code} {stt5} {quota()}")
+    r = upload("10.0.0.9")
+    jobt6 = (r.get_json() or {}).get("job")
+    stt6 = S._load_job_state(jobt6) if jobt6 else {}
+    check("tanpa token dari IP sama -> bukan gratis",
+          r.status_code == 202 and jobt6 and not stt6.get("free")
+          and quota().get("used") == 1,
+          f"dapat {r.status_code} {stt6} {quota()}")
 
     print(f"\n{len(passed)} PASS, {len(failed)} FAIL")
     if failed:

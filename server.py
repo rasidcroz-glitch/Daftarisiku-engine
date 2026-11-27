@@ -119,7 +119,7 @@ ALLOWED_ORIGINS = {
     o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",")
     if o.strip()
 }
-VERSION = "0.6.38"  # v0.6.38: 10 dokumen pertama GRATIS — counter persisten free_quota.json (env FREE_LIMIT, default 10) + maks 1 gratis per IP; /api/download membuka job gratis tanpa bayar (status "free", TIDAK masuk paid.json), /api/status membawa free + free_number + free_left + free_limit, /api/health membawa free_left + free_limit. Kasera/Midtrans/simulate TIDAK diubah. v0.6.37: integrasi Kasera Pay — POST /api/pay/kasera/<job> (QRIS Rp15.000 otomatis; kunci dari env KASERA_PAY_KEY, 503 bila belum disetel), webhook POST /api/pay/kasera/webhook (verifikasi HMAC-SHA256 Kasera-Signature-V1, dedupe id event, hanya payment.paid yang melunasi), GET /api/pay/kasera/<job>/qr (PNG QRIS Kasera), /api/status kini membawa info kasera + polling status Kasera. Midtrans + simulasi TIDAK diubah. v0.6.36: footer Romawi dokumen 1 section yang BAB I-nya mulai di halaman baru TANPA break eksplisit (SKRIPSI ACA 24 Nov 2026: sectPr pindahan 1-section kini jadi nextPage bila bab_new_page True dari PDF pra-footer — break nextPage itu netral pagination karena BAB I sudah di puncak halaman baru, dan LibreOffice baru menerapkan lowerRoman; sebelumnya fallback continuous membuat footer depan tetap Arab "2"–"7" walau label TOC Romawi dan verifikasi "lolos"). v0.6.35: footer Romawi dokumen 1 section — sectPr continuous di paragraf BAB I bila tepat 1 section + _has_front + BAB I mulai di halaman baru (makalah: depan Romawi, bab1_footer=1). v0.6.34: simulasi bayar bertoken POST /api/pay/simulate/<job> (sandbox saja; wajib header X-Reports-Token = REPORTS_TOKEN, tanpa token -> 404; mati total bila MIDTRANS_IS_PRODUCTION=1; pengganti /api/pay/mock yang ditutup v0.6.28 — mock lama TETAP tertutup, tidak dibuka lagi). v0.6.33: posisi "Kanan atas" (page_pos: top-right) — nomor halaman isi di header kanan atas, footer isi dikosongkan; "Kiri bawah" (left) dihapus dari website. Halaman depan + halaman pertama BAB tetap tengah. Perbaiki juga pemanggilan _ensure_bab_first_page_footer 2-argumen (TypeError laten v0.6.32). v0.6.32: pilihan posisi nomor halaman isi (page_pos: right/center/left; halaman depan + halaman pertama BAB tetap tengah). v0.6.31: anti-DoS + strip rel eksternal (audit keamanan 23 Nov): antrean maks 5 (penuh -> 429), rate limit upload 5/jam/IP (env MAX_UPLOADS_PER_HOUR), tolak .docx yang mengembang >100 MB total / >50 MB per file (zip bomb), hapus relasi eksternal dari salinan + hasil sebelum di-render LibreOffice. v0.6.30: pengerasan bayar + laporan (audit keamanan 23 Nov): tandai lunas hanya bila gross_amount Midtrans == Rp15.000; batasi charge QRIS maks 5/job; /api/reports wajib token rahasia (env REPORTS_TOKEN); pesan error ke pelanggan generik (detail hanya di log server); security headers di semua respons engine. v0.6.28: endpoint /api/pay/mock DIHAPUS (celah keamanan: siapa pun yang tahu link job bisa menandai lunas gratis); website sudah tidak memakainya sejak PAY_MOCK=false, bayar hanya lewat QRIS Midtrans. v0.6.27: jeda halaman setelah tiap daftar berlaku umum tanpa memandang urutan heading di dokumen — (a) jeda setelah entri DAFTAR ISI terakhir juga di jalur dokumen YANG PUNYA heading DAFTAR ISI (makalah ppkn: BAB I + isi bab menempel di halaman daftar isi); (b) jeda setelah Daftar Gambar tidak lagi dilewati bila ada Daftar Tabel — urutan daftar mengikuti heading dokumen, dan bila Daftar Tabel sudah ada SEBELUM Daftar Gambar (Gusti Ayu), judul BAB I menempel di halaman Daftar Gambar; (c) _needs_break_after kini mengenali break pada paragraf KOSONG (run break / sectPr nextPage) — jeda tambahan di atas break sumber jadi halaman kosong (UJI_COBA_2); (d) run break footer v0.6.11 langkah (b) hanya disisipkan bila tidak ada isi di antara judul BAB I dan sectPr penutup — bila ada isi, section break penutup sudah memisahkan sendiri dan run break tambahan jadi halaman kosong (Gusti Ayu). v0.6.26: daftar isi diletakkan sebelum judul BAB I + jeda halaman setelah Daftar Gambar/Tabel terakhir (dokumen tanpa heading "DAFTAR ISI"; cacat 22 Nov 2026). v0.6.25: gaya penomoran daftar isi mengikuti gaya dokumen sendiri — nomor dirender Word di isi dokumen (simulasi penghitung list Word atas semua paragraf: '1.1' bertitik, 'I.' Romawi, 'A.' huruf; jatuh ke awalan literal judul bila tanpa numPr, lalu format contoh dosen). v0.6.24: judul DAFTAR ISI yang membawa sectPr sendiri kini sectPr-nya dihapus (bila format nomor sama) + page_break_before, supaya judul+entri mulai di halaman baru (cacat UJI_COBA_2: judul yatim di halaman sendiri, footer jadi Arab "10"). v0.6.23: label TOC dari PDF hasil dihitung dari baris judul (bukan substring) + bab1 = halaman Arab '1' (bukan halaman judul BAB I — bila BAB I mulai di tengah halaman, halaman judulnya masih Romawi; label dihitung dari footer, diklem minimal 1) + strip nomor gaya '1)' + gabung judul 3 baris — perbaikan cacat UJI_COBA_2 (BAB II–V 5 halaman terlalu kecil karena paragraf Sistematika Penulisan menyebut semua judul BAB) dan Gusti Ayu (sub-judul indikator '1)' + BAB I tengah halaman). v0.6.22: AI Document Checker — check_document() di toc.py (aturan struktur, tanpa API, laporan saja): judul BAB tidak konsisten (Romawi vs Arab), penomoran sub-bab loncat / sub-sub tanpa induk, tabel/gambar tanpa keterangan bernomor, entri yang nomor halamannya tak terverifikasi. Hasilnya di payload "checker_warnings"; website menampilkan kotaknya di pratinjau. v0.6.21: tombol "Laporkan hasil salah" — POST /api/report/<job> (satu laporan per job, TIDAK membuka download; disimpan {job}.report.json, ikut kedaluwarsa 24 jam) + GET /api/reports (daftar laporan untuk pemilik/Muse). Website: tombol ghost di layar pratinjau + prompt deskripsi opsional + status konfirmasi. v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
+VERSION = "0.6.40"  # v0.6.40: klaim gratis pakai token per-browser (header X-Free-Token), fallback IP — perbaikan insiden 27 Nov 2026 (semua pengunjung tampak sebagai 10.10.0.1); rate limit upload ikut kunci token; QRIS kini juga tampil langsung di layar pratinjau untuk job berbayar (website). v0.6.38: 10 dokumen pertama GRATIS — counter persisten free_quota.json (env FREE_LIMIT, default 10) + maks 1 gratis per IP; /api/download membuka job gratis tanpa bayar (status "free", TIDAK masuk paid.json), /api/status membawa free + free_number + free_left + free_limit, /api/health membawa free_left + free_limit. Kasera/Midtrans/simulate TIDAK diubah. v0.6.37: integrasi Kasera Pay — POST /api/pay/kasera/<job> (QRIS Rp15.000 otomatis; kunci dari env KASERA_PAY_KEY, 503 bila belum disetel), webhook POST /api/pay/kasera/webhook (verifikasi HMAC-SHA256 Kasera-Signature-V1, dedupe id event, hanya payment.paid yang melunasi), GET /api/pay/kasera/<job>/qr (PNG QRIS Kasera), /api/status kini membawa info kasera + polling status Kasera. Midtrans + simulasi TIDAK diubah. v0.6.36: footer Romawi dokumen 1 section yang BAB I-nya mulai di halaman baru TANPA break eksplisit (SKRIPSI ACA 24 Nov 2026: sectPr pindahan 1-section kini jadi nextPage bila bab_new_page True dari PDF pra-footer — break nextPage itu netral pagination karena BAB I sudah di puncak halaman baru, dan LibreOffice baru menerapkan lowerRoman; sebelumnya fallback continuous membuat footer depan tetap Arab "2"–"7" walau label TOC Romawi dan verifikasi "lolos"). v0.6.35: footer Romawi dokumen 1 section — sectPr continuous di paragraf BAB I bila tepat 1 section + _has_front + BAB I mulai di halaman baru (makalah: depan Romawi, bab1_footer=1). v0.6.34: simulasi bayar bertoken POST /api/pay/simulate/<job> (sandbox saja; wajib header X-Reports-Token = REPORTS_TOKEN, tanpa token -> 404; mati total bila MIDTRANS_IS_PRODUCTION=1; pengganti /api/pay/mock yang ditutup v0.6.28 — mock lama TETAP tertutup, tidak dibuka lagi). v0.6.33: posisi "Kanan atas" (page_pos: top-right) — nomor halaman isi di header kanan atas, footer isi dikosongkan; "Kiri bawah" (left) dihapus dari website. Halaman depan + halaman pertama BAB tetap tengah. Perbaiki juga pemanggilan _ensure_bab_first_page_footer 2-argumen (TypeError laten v0.6.32). v0.6.32: pilihan posisi nomor halaman isi (page_pos: right/center/left; halaman depan + halaman pertama BAB tetap tengah). v0.6.31: anti-DoS + strip rel eksternal (audit keamanan 23 Nov): antrean maks 5 (penuh -> 429), rate limit upload 5/jam/IP (env MAX_UPLOADS_PER_HOUR), tolak .docx yang mengembang >100 MB total / >50 MB per file (zip bomb), hapus relasi eksternal dari salinan + hasil sebelum di-render LibreOffice. v0.6.30: pengerasan bayar + laporan (audit keamanan 23 Nov): tandai lunas hanya bila gross_amount Midtrans == Rp15.000; batasi charge QRIS maks 5/job; /api/reports wajib token rahasia (env REPORTS_TOKEN); pesan error ke pelanggan generik (detail hanya di log server); security headers di semua respons engine. v0.6.28: endpoint /api/pay/mock DIHAPUS (celah keamanan: siapa pun yang tahu link job bisa menandai lunas gratis); website sudah tidak memakainya sejak PAY_MOCK=false, bayar hanya lewat QRIS Midtrans. v0.6.27: jeda halaman setelah tiap daftar berlaku umum tanpa memandang urutan heading di dokumen — (a) jeda setelah entri DAFTAR ISI terakhir juga di jalur dokumen YANG PUNYA heading DAFTAR ISI (makalah ppkn: BAB I + isi bab menempel di halaman daftar isi); (b) jeda setelah Daftar Gambar tidak lagi dilewati bila ada Daftar Tabel — urutan daftar mengikuti heading dokumen, dan bila Daftar Tabel sudah ada SEBELUM Daftar Gambar (Gusti Ayu), judul BAB I menempel di halaman Daftar Gambar; (c) _needs_break_after kini mengenali break pada paragraf KOSONG (run break / sectPr nextPage) — jeda tambahan di atas break sumber jadi halaman kosong (UJI_COBA_2); (d) run break footer v0.6.11 langkah (b) hanya disisipkan bila tidak ada isi di antara judul BAB I dan sectPr penutup — bila ada isi, section break penutup sudah memisahkan sendiri dan run break tambahan jadi halaman kosong (Gusti Ayu). v0.6.26: daftar isi diletakkan sebelum judul BAB I + jeda halaman setelah Daftar Gambar/Tabel terakhir (dokumen tanpa heading "DAFTAR ISI"; cacat 22 Nov 2026). v0.6.25: gaya penomoran daftar isi mengikuti gaya dokumen sendiri — nomor dirender Word di isi dokumen (simulasi penghitung list Word atas semua paragraf: '1.1' bertitik, 'I.' Romawi, 'A.' huruf; jatuh ke awalan literal judul bila tanpa numPr, lalu format contoh dosen). v0.6.24: judul DAFTAR ISI yang membawa sectPr sendiri kini sectPr-nya dihapus (bila format nomor sama) + page_break_before, supaya judul+entri mulai di halaman baru (cacat UJI_COBA_2: judul yatim di halaman sendiri, footer jadi Arab "10"). v0.6.23: label TOC dari PDF hasil dihitung dari baris judul (bukan substring) + bab1 = halaman Arab '1' (bukan halaman judul BAB I — bila BAB I mulai di tengah halaman, halaman judulnya masih Romawi; label dihitung dari footer, diklem minimal 1) + strip nomor gaya '1)' + gabung judul 3 baris — perbaikan cacat UJI_COBA_2 (BAB II–V 5 halaman terlalu kecil karena paragraf Sistematika Penulisan menyebut semua judul BAB) dan Gusti Ayu (sub-judul indikator '1)' + BAB I tengah halaman). v0.6.22: AI Document Checker — check_document() di toc.py (aturan struktur, tanpa API, laporan saja): judul BAB tidak konsisten (Romawi vs Arab), penomoran sub-bab loncat / sub-sub tanpa induk, tabel/gambar tanpa keterangan bernomor, entri yang nomor halamannya tak terverifikasi. Hasilnya di payload "checker_warnings"; website menampilkan kotaknya di pratinjau. v0.6.21: tombol "Laporkan hasil salah" — POST /api/report/<job> (satu laporan per job, TIDAK membuka download; disimpan {job}.report.json, ikut kedaluwarsa 24 jam) + GET /api/reports (daftar laporan untuk pemilik/Muse). Website: tombol ghost di layar pratinjau + prompt deskripsi opsional + status konfirmasi. v0.6.20: pilihan download PDF atau Word — satu bayar Rp15.000 membuka keduanya (process() kini mengembalikan output_pdf = render akhir yang cocok dengan docx final; worker menyimpannya sebagai {job}-hasil-daftar-isi.pdf; /api/download/<job>?format=pdf mengunduh PDF dengan nama file asli + .pdf). v0.6.19: (1) nomor double — footer yang field PAGE-nya berada di dalam <w:sdt> ('Page Numbers' Word) kini terdeteksi, jadi mesin tidak menambah field kedua; bila ada >1 field, sisanya dibuang. (2) daftar isi pisah — section break nextPage tepat setelah judul DAFTAR ISI/GAMBAR/TABEL diubah jadi continuous (hanya bila fmt pgNumType kedua sisi sama) supaya judul+entri satu halaman. (3) hemat memori — Document sumber dan teks PDF masukan dibebaskan (del + gc + trim) sebelum tiap render LibreOffice, supaya total tidak melewati 512 MB container dan job tidak hilang (404) saat polling. v0.6.18: RE_CAPTION kini menerima nomor "Gambar 2. 1" (titik+spasi; dulu hanya "2.1"/"2 1") — caption UJI_COBA_2 yang 56 buah kini terdeteksi, Daftar Gambar/Tabel tidak lagi kosong; heading template daftar yang kosong tetap diberi page_break_before supaya tidak menempel di daftar isi. v0.6.17: /api/toc ASINKRON — upload langsung balas 202 {job, status:"queued"}; proses jalan di satu worker thread latar (antrean FIFO, satu dokumen dalam satu waktu) dan status dicek lewat /api/status (queued/processing/done/error + hasil pratinjau bila done).
 # (titlePg + first-page footer tengah; nextPage break hanya sebelum
 # BAB yang mulai di halaman baru). QRIS v0.6.9 tetap ada.
 
@@ -136,10 +136,11 @@ QRIS_EXPIRY_SECONDS = 15 * 60  # default Midtrans untuk QRIS: 15 menit
 MAX_QRIS_ATTEMPTS = 5
 REPORTS_TOKEN = os.environ.get("REPORTS_TOKEN", "")
 
-# --- dokumen gratis (v0.6.38) --------------------------------------
+# --- dokumen gratis (v0.6.38; kunci token v0.6.40) ------------------
 # 10 dokumen pertama GRATIS (tanpa login): counter persisten di
-# free_quota.json + maks 1 gratis per IP. FREE_LIMIT dari env supaya
-# tes bisa set 1-2. Bila kuota habis -> alur bayar Rp15.000 biasa.
+# free_quota.json + maks 1 gratis per pengunjung (token browser
+# X-Free-Token, fallback IP bila tanpa token). FREE_LIMIT dari env
+# supaya tes bisa set 1-2. Bila kuota habis -> alur bayar Rp15.000 biasa.
 FREE_QUOTA_FILE = os.path.join(RESULTS_DIR, "free_quota.json")
 FREE_LIMIT = int(os.environ.get("FREE_LIMIT", "10"))
 
@@ -163,7 +164,7 @@ def apply_cors(resp):
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Vary"] = "Origin"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Free-Token"
         resp.headers["Access-Control-Expose-Headers"] = "Content-Disposition"
     # v0.6.30: security headers untuk semua respons engine.
     resp.headers["Strict-Transport-Security"] = "max-age=63072000"
@@ -208,7 +209,8 @@ _FREE_QUOTA_LOCK = threading.Lock()
 
 
 def _load_free_quota():
-    """{"used": int, "ips": [ip, ...]}; file rusak/hilang -> kosong."""
+    """{"used": int, "ips": [kunci, ...]}; kunci = tok:<token> atau
+    ip:<alamat>. File rusak/hilang -> kosong."""
     try:
         with open(FREE_QUOTA_FILE) as f:
             d = json.load(f) or {}
@@ -233,8 +235,8 @@ def _free_left():
 
 
 def _try_claim_free(ip):
-    """Klaim 1 slot gratis untuk IP ini; kembalikan nomor urut
-    (1..FREE_LIMIT) atau None bila kuota habis / IP sudah pakai.
+    """Klaim 1 slot gratis untuk kunci ini; kembalikan nomor urut
+    (1..FREE_LIMIT) atau None bila kuota habis / kunci sudah pakai.
     Dihitung saat job dibuat. Kunci proses: gunicorn 1 worker."""
     with _FREE_QUOTA_LOCK:
         q = _load_free_quota()
@@ -562,6 +564,22 @@ def _client_ip():
     return request.remote_addr or "unknown"
 
 
+def _free_key():
+    """Kunci klaim gratis: token per-browser (header X-Free-Token)
+    bila ada dan valid, fallback IP. Token membedakan pengunjung
+    walau semua IP terlihat sama di balik proxy (insiden 27 Nov 2026:
+    semua pengunjung tampak sebagai 10.10.0.1, jadi 1 gratis per IP
+    berubah menjadi 1 gratis untuk semua orang). Token dibuat website
+    di localStorage dan dikirim tiap upload; tanpa token (mis.
+    pemanggil API langsung) kembali ke IP. Awalan tok:/ip: mencegah
+    token bentrok dengan alamat IP di free_quota.json."""
+    tok = (request.headers.get("X-Free-Token") or "").strip()
+    if tok and len(tok) <= 64 and all(
+            c.isalnum() or c in "-_" for c in tok):
+        return "tok:" + tok
+    return "ip:" + _client_ip()
+
+
 def _check_upload_rate(ip):
     """True bila IP masih boleh upload (maks N/jam, sliding window
     1 jam, in-memory; reset saat restart — bisa diterima)."""
@@ -737,8 +755,9 @@ def make_toc():
     page_pos = (request.form.get("page_pos", "right") or "right").strip().lower()
     if page_pos not in ("right", "center", "left", "top-right"):
         page_pos = "right"
-    # v0.6.31: rate limit per IP sebelum file disimpan.
-    if not _check_upload_rate(_client_ip()):
+    # v0.6.31: rate limit sebelum file disimpan; v0.6.40: kunci
+    # token/IP (kasus 10.10.0.1 — batas per IP jadi batas global).
+    if not _check_upload_rate(_free_key()):
         shutil.rmtree(work, ignore_errors=True)
         return jsonify(
             {"error": "terlalu banyak upload dari alamat ini, "
@@ -772,7 +791,7 @@ def make_toc():
             {"error": "server sedang sibuk, coba lagi sebentar"}), 429
     # v0.6.38: klaim slot gratis SETELAH antrean menerima job, supaya
     # job yang ditolak (antrean penuh) tidak memakan kuota.
-    free_number = _try_claim_free(_client_ip())
+    free_number = _try_claim_free(_free_key())
     if free_number is not None:
         _update_job_state(job, free=True, free_number=free_number)
     return jsonify({"job": job, "status": "queued"}), 202
